@@ -9,7 +9,7 @@ services:
   # Infrastructure
   # ─────────────────────────────────────────────
   postgres:
-    image: postgres:16-alpine
+    image: docker.io/library/postgres:16-alpine
     container_name: polepad-postgres
     environment:
       POSTGRES_USER: polepad
@@ -26,7 +26,7 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    image: docker.io/library/redis:7-alpine
     container_name: polepad-redis
     ports:
       - "6379:6379"
@@ -101,8 +101,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      cv-service:
-        condition: service_healthy
       ocr-service:
         condition: service_healthy
     healthcheck:
@@ -145,7 +143,8 @@ services:
       context: .
       dockerfile: infra/docker/api.Dockerfile
     container_name: polepad-migrate
-    command: sh -c "alembic -c packages/db/alembic.ini upgrade head && python scripts/seed_demo.py"
+    entrypoint: ["sh", "-lc"]
+    command: "alembic -c /app/packages/db/alembic.ini upgrade head && python /app/scripts/seed_demo.py"
     env_file:
       - .env
     environment:
