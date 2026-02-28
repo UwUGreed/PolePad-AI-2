@@ -1,0 +1,181 @@
+version: "3.9"
+
+# PolePad AI — Local MVP Stack
+# Run everything: docker compose up --build
+# Stop everything: docker compose down -v
+
+services:
+  # ─────────────────────────────────────────────
+  # Infrastructure
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: polepad-postgres
+    environment:
+      POSTGRES_USER: polepad
+      POSTGRES_PASSWORD: polepad
+      POSTGRES_DB: polepad
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polepad"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: polepad-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # ML Services
+  # ─────────────────────────────────────────────
+  cv-service:
+    build:
+      context: .
+      dockerfile: infra/docker/cv-service.Dockerfile
+    container_name: polepad-cv
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./ml/models:/app/models:ro
+    environment:
+      MODEL_PATH: /app/models/demo/best.pt
+      MODEL_VERSION: demo-v1.0.0
+      DETECTION_CONFIDENCE_THRESHOLD: 0.45
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  ocr-service:
+    build:
+      context: .
+      dockerfile: infra/docker/ocr-service.Dockerfile
+    container_name: polepad-ocr
+    ports:
+      - "8002:8002"
+    environment:
+      OCR_UNCERTAINTY_THRESHOLD: 0.75
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+  # ─────────────────────────────────────────────
+  # Backend API
+  # ─────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    container_name: polepad-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
+      REDIS_URL: redis://redis:6379/0
+      CV_SERVICE_URL: http://cv-service:8001
+      OCR_SERVICE_URL: http://ocr-service:8002
+      IMAGE_STORAGE_BACKEND: local
+      LOCAL_IMAGE_DIR: /data/images
+    volumes:
+      - image_data:/data/images
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      cv-service:
+        condition: service_healthy
+      ocr-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # Celery Worker (async jobs)
+  # ─────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    container_name: polepad-worker
+    command: celery -A celery_app worker --loglevel=info --concurrency=2
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
+      REDIS_URL: redis://redis:6379/0
+      CV_SERVICE_URL: http://cv-service:8001
+      OCR_SERVICE_URL: http://ocr-service:8002
+      IMAGE_STORAGE_BACKEND: local
+      LOCAL_IMAGE_DIR: /data/images
+    volumes:
+      - image_data:/data/images
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────────
+  # Database Setup (runs once, then exits)
+  # ─────────────────────────────────────────────
+  db-migrate:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    container_name: polepad-migrate
+    command: sh -c "alembic -c packages/db/alembic.ini upgrade head && python scripts/seed_demo.py"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ─────────────────────────────────────────────
+  # Frontend
+  # ─────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+    container_name: polepad-web
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_APP_NAME: PolePad AI
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  image_data:
+
+networks:
+  default:
+    name: polepad-network

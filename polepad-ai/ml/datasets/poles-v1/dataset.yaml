@@ -1,0 +1,15 @@
+path: ../datasets/poles-v1
+train: images/train
+val: images/val
+test: images/test
+
+nc: 8
+names:
+  0: asset_tag
+  1: crossarm
+  2: vegetation_contact
+  3: guy_wire
+  4: transformer
+  5: safety_equipment
+  6: structural_damage
+  7: safety_equipment_missing

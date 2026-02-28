@@ -1,0 +1,45 @@
+# Environment
+.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.next/
+out/
+
+# Docker
+*.log
+
+# ML
+ml/models/**/*.pt
+!ml/models/.gitkeep
+ml/training/runs/
+wandb/
+mlruns/
+
+# Data
+/data/
+*.jpg
+*.jpeg
+*.png
+!docs/sample-images/**
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Secrets
+*.pem
+*.key
