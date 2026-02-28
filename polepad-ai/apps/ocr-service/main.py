@@ -1,256 +1,202 @@
-"""
-apps/ocr-service/main.py
+from __future__ import annotations
 
-OCR Extraction Microservice
-Exposes:  POST /extract  →  OCRExtractResponse
-          GET  /health   →  {"status": "ok"}
-
-Input:  base64 cropped tag image
-Output: character-level confidence, normalized string, uncertain positions
-"""
-
-import os
 import base64
-import time
+import os
 import re
+import time
 import logging
 from io import BytesIO
-from typing import Optional
-import sys
+from typing import List
 
 import numpy as np
 from fastapi import FastAPI
-from PIL import Image, ImageEnhance, ImageFilter
+from pydantic import BaseModel
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+import pytesseract
 
-sys.path.insert(0, "/app/packages/shared-types")
-from schemas import OCRExtractRequest, OCRExtractResponse, CharacterConfidence, BoundingBox
+from packages.shared_types.schemas import OCRExtractResponse, CharacterConfidence
 
-log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("ocr-service")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
-app = FastAPI(title="PolePad OCR Service", version="1.0.0")
-
+MODEL_VERSION = os.getenv("OCR_MODEL_VERSION", "tesseract-tag-v1.0.0")
 UNCERTAINTY_THRESHOLD = float(os.getenv("OCR_UNCERTAINTY_THRESHOLD", "0.75"))
-MODEL_VERSION = "paddleocr-tag-v1.0.0"
 
-ocr_engine = None
-
-
-# ─────────────────────────────────────────────────────────────
-# Confusable Character Normalization
-# Maps characters that look alike in alphanumeric tag strings
-# ─────────────────────────────────────────────────────────────
-
-CONFUSABLES = {
-    "O": "0",   # Letter O → Zero (most utility tags use digits)
-    "I": "1",   # Letter I → One
-    "l": "1",   # lowercase L → One
-    "S": "5",   # S → 5 (common misread)
-    "B": "8",   # B → 8
-    "G": "6",   # G → 6
-    "Z": "2",   # Z → 2
-}
-
-# Characters valid in utility pole tag strings
-VALID_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_/.")
+ocr_ok = False
+tesseract_version = None
 
 
-def normalize_tag(raw: str) -> str:
-    """
-    Normalize raw OCR output to a clean asset tag string.
-    1. Strip whitespace, uppercase
-    2. Remove non-tag characters
-    3. Apply confusable substitutions where confidence is low
-    """
-    cleaned = raw.strip().upper()
-    cleaned = re.sub(r"[^A-Z0-9\-_/.]", "", cleaned)
-    return cleaned
+class OCRExtractRequest(BaseModel):
+    image_id: str
+    image_b64: str  # base64 of raw image bytes (jpg/png)
 
 
-def apply_confusables(char: str, confidence: float) -> str:
-    """Only substitute confusable characters if confidence is low"""
-    if confidence < UNCERTAINTY_THRESHOLD and char in CONFUSABLES:
-        return CONFUSABLES[char]
-    return char
+def normalize_tag(s: str) -> str:
+    s = (s or "").strip().upper()
+    # common confusables
+    s = s.replace("O", "0").replace("I", "1").replace("|", "1")
+    # keep only allowed chars for tags
+    s = re.sub(r"[^A-Z0-9\-\_\/\.]", "", s)
+    return s
 
 
-# ─────────────────────────────────────────────────────────────
-# Image Preprocessing
-# ─────────────────────────────────────────────────────────────
-
-def preprocess_tag_image(img: Image.Image) -> tuple[Image.Image, list[str]]:
-    """
-    Apply preprocessing pipeline for better OCR on utility tags.
-    Returns (processed_image, list_of_applied_steps)
-    """
-    applied = []
-    original_size = img.size
-
-    # Convert to RGB
+def preprocess_tag_image(img: Image.Image) -> Image.Image:
+    # light, safe preprocessing: contrast + sharpen
     img = img.convert("RGB")
-
-    # Resize if too small
-    w, h = img.size
-    if w < 200 or h < 50:
-        scale = max(200 / w, 50 / h)
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-        applied.append("upscaled")
-
-    # Convert to grayscale for processing
-    gray = img.convert("L")
-
-    # Enhance contrast (helps with faded tags)
-    enhancer = ImageEnhance.Contrast(gray)
-    gray = enhancer.enhance(2.0)
-    applied.append("contrast_enhanced")
-
-    # Sharpen
-    gray = gray.filter(ImageFilter.SHARPEN)
-    applied.append("sharpened")
-
-    # Glare detection: if mean brightness > 200, apply adaptive threshold
-    arr = np.array(gray)
-    if arr.mean() > 200:
-        # Invert to make dark text on bright background readable
-        gray = Image.fromarray(255 - arr)
-        applied.append("glare_inversion")
-
-    return gray.convert("RGB"), applied
+    img = ImageEnhance.Contrast(img).enhance(1.8)
+    img = img.filter(ImageFilter.SHARPEN)
+    return img
 
 
-# ─────────────────────────────────────────────────────────────
-# Model Loading
-# ─────────────────────────────────────────────────────────────
-
-def load_ocr():
-    global ocr_engine
+def load_ocr() -> None:
+    global ocr_ok, tesseract_version
     try:
-        from paddleocr import PaddleOCR
-        ocr_engine = PaddleOCR(
-            use_angle_cls=True,
-            lang="en",
-            show_log=False,
-            use_gpu=False,
-        )
-        log.info("[ocr] PaddleOCR engine loaded")
-    except ImportError:
-        log.warning("[ocr] paddleocr not installed — running in mock mode")
-        ocr_engine = None
+        tesseract_version = str(pytesseract.get_tesseract_version())
+        ocr_ok = True
+        log.info(f"[ocr] Tesseract loaded (version {tesseract_version})")
+    except Exception as e:
+        ocr_ok = False
+        log.warning(f"[ocr] Tesseract not available — {e}")
+
+
+def run_ocr(img: Image.Image) -> tuple[str, float]:
+    # PSM 7: single text line (tag plates usually)
+    config = (
+        "--psm 7 "
+        "--oem 3 "
+        "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_/."
+    )
+
+    # Try line mode first
+    raw = pytesseract.image_to_string(img, config=config).strip()
+
+    # Fallback: single word
+    if not raw:
+        raw = pytesseract.image_to_string(
+            img,
+            config="--psm 8 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_/."
+        ).strip()
+
+    # Confidence: use image_to_data word confidences if possible
+    conf = 0.0
+    try:
+        data = pytesseract.image_to_data(img, config=config, output_type=pytesseract.Output.DICT)
+        confs = []
+        for c in data.get("conf", []):
+            try:
+                ci = int(c)
+                if ci >= 0:
+                    confs.append(ci / 100.0)
+            except Exception:
+                pass
+        if confs:
+            conf = float(sum(confs) / len(confs))
+    except Exception:
+        pass
+
+    # If still 0 but we got text, give a conservative baseline
+    if raw and conf == 0.0:
+        conf = 0.70
+
+    return raw, conf
+
+
+app = FastAPI(title="polepad-ocr")
 
 
 @app.on_event("startup")
-async def startup():
+def _startup():
     load_ocr()
 
 
-# ─────────────────────────────────────────────────────────────
-# Inference
-# ─────────────────────────────────────────────────────────────
-
-def mock_ocr_result(image_id: str) -> OCRExtractResponse:
-    """Demo fallback: return a plausible utility pole tag"""
-    raw = "TP-1042-A"
-    chars = [
-        CharacterConfidence(char="T", confidence=0.98, uncertain=False, position=0),
-        CharacterConfidence(char="P", confidence=0.96, uncertain=False, position=1),
-        CharacterConfidence(char="-", confidence=0.99, uncertain=False, position=2),
-        CharacterConfidence(char="1", confidence=0.72, uncertain=True,  position=3),  # uncertain
-        CharacterConfidence(char="0", confidence=0.94, uncertain=False, position=4),
-        CharacterConfidence(char="4", confidence=0.89, uncertain=False, position=5),
-        CharacterConfidence(char="2", confidence=0.91, uncertain=False, position=6),
-        CharacterConfidence(char="-", confidence=0.99, uncertain=False, position=7),
-        CharacterConfidence(char="A", confidence=0.95, uncertain=False, position=8),
-    ]
-    mean_conf = sum(c.confidence for c in chars) / len(chars)
-    return OCRExtractResponse(
-        image_id=image_id,
-        model_version=MODEL_VERSION,
-        raw_string=raw,
-        normalized_string=normalize_tag(raw),
-        character_confidences=chars,
-        uncertain_positions=[3],
-        mean_confidence=round(mean_conf, 4),
-        preprocessing_applied=["contrast_enhanced", "sharpened"],
-        processing_ms=45,
-    )
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "ocr-service",
+        "model_version": MODEL_VERSION,
+        "tesseract_ok": ocr_ok,
+        "tesseract_version": tesseract_version,
+    }
 
 
-def run_paddle_ocr(image: Image.Image, image_id: str) -> OCRExtractResponse:
-    if ocr_engine is None:
-        return mock_ocr_result(image_id)
+@app.post("/extract", response_model=OCRExtractResponse)
+def extract(req: OCRExtractRequest):
+    t0 = time.monotonic()
 
-    arr = np.array(image)
-    results = ocr_engine.ocr(arr, cls=True)
+    if not ocr_ok:
+        # return a clean "empty" result rather than fake TP-1042-A
+        return OCRExtractResponse(
+            image_id=req.image_id,
+            model_version=MODEL_VERSION,
+            raw_string="",
+            normalized_string="",
+            character_confidences=[],
+            uncertain_positions=[],
+            mean_confidence=0.0,
+            preprocessing_applied=[],
+            processing_ms=int((time.monotonic() - t0) * 1000),
+        )
 
-    if not results or not results[0]:
-        log.debug(f"[ocr] No text detected for {image_id}")
-        return mock_ocr_result(image_id)
+    try:
+        img_bytes = base64.b64decode(req.image_b64)
+        img = Image.open(BytesIO(img_bytes)).convert("RGB")
+    except Exception as e:
+        log.error(f"[ocr] decode failed: {e}")
+        return OCRExtractResponse(
+            image_id=req.image_id,
+            model_version=MODEL_VERSION,
+            raw_string="",
+            normalized_string="",
+            character_confidences=[],
+            uncertain_positions=[],
+            mean_confidence=0.0,
+            preprocessing_applied=[],
+            processing_ms=int((time.monotonic() - t0) * 1000),
+        )
 
-    # Take the highest confidence text region
-    best = max(results[0], key=lambda x: x[1][1])
-    raw_text, confidence = best[1]
+    processed = preprocess_tag_image(img)
+    raw_text, word_conf = run_ocr(processed)
+    normalized = normalize_tag(raw_text)
 
-    # Build character-level confidence
-    # PaddleOCR gives per-word confidence; distribute evenly as approximation
-    chars = []
-    uncertain_positions = []
-    for i, ch in enumerate(raw_text):
-        # Simulate per-character variance around the word confidence
-        char_conf = min(1.0, max(0.0, confidence + (np.random.random() - 0.5) * 0.1))
-        uncertain = char_conf < UNCERTAINTY_THRESHOLD
-        chars.append(CharacterConfidence(
-            char=ch,
-            confidence=round(char_conf, 4),
-            uncertain=uncertain,
-            position=i
-        ))
+    chars: List[CharacterConfidence] = []
+    uncertain_positions: List[int] = []
+
+    # distribute word_conf across chars (tesseract doesn't provide per-char)
+    for i, ch in enumerate(normalized):
+        jitter = (np.random.random() - 0.5) * 0.08
+        cconf = float(min(1.0, max(0.0, word_conf + jitter)))
+        uncertain = cconf < UNCERTAINTY_THRESHOLD
+        chars.append(CharacterConfidence(char=ch, confidence=round(cconf, 4), uncertain=uncertain, position=i))
         if uncertain:
             uncertain_positions.append(i)
 
-    mean_conf = sum(c.confidence for c in chars) / len(chars) if chars else 0.0
-    normalized = normalize_tag(raw_text)
+    mean_conf = float(sum(c.confidence for c in chars) / len(chars)) if chars else 0.0
+    ms = int((time.monotonic() - t0) * 1000)
 
     return OCRExtractResponse(
-        image_id=image_id,
+        image_id=req.image_id,
         model_version=MODEL_VERSION,
         raw_string=raw_text,
         normalized_string=normalized,
         character_confidences=chars,
         uncertain_positions=uncertain_positions,
         mean_confidence=round(mean_conf, 4),
-    )
+        preprocessing_applied=["contrast_enhanced", "sharpened"],
+        processing_ms=ms,
+    )def _prep_for_tesseract(img: Image.Image) -> Image.Image:
+    # 1) upscale big (tesseract loves big text)
+    w,h = img.size
+    scale = 4
+    img = img.resize((w*scale, h*scale), Image.Resampling.LANCZOS)
+    # 2) grayscale
+    img = ImageOps.grayscale(img)
+    # 3) increase contrast
+    img = ImageEnhance.Contrast(img).enhance(2.5)
+    # 4) binarize (hard threshold)
+    img = img.point(lambda x: 255 if x > 140 else 0)
+    # 5) tiny sharpen
+    img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=180, threshold=2))
+    return img
 
 
-# ─────────────────────────────────────────────────────────────
-# Routes
-# ─────────────────────────────────────────────────────────────
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "ocr-service", "model_version": MODEL_VERSION}
-
-
-@app.post("/extract", response_model=OCRExtractResponse)
-async def extract(request: OCRExtractRequest):
-    t0 = time.monotonic()
-
-    try:
-        image_bytes = base64.b64decode(request.image_b64)
-        img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    except Exception as e:
-        log.error(f"[ocr] Image decode failed: {e}")
-        return mock_ocr_result(request.image_id)
-
-    # Preprocess
-    processed_img, preprocessing_applied = preprocess_tag_image(img)
-
-    # Run OCR
-    result = run_paddle_ocr(processed_img, request.image_id)
-    result.preprocessing_applied = preprocessing_applied
-
-    processing_ms = int((time.monotonic() - t0) * 1000)
-    result.processing_ms = processing_ms
-
-    log.info(f"[ocr] {request.image_id}: '{result.normalized_string}' conf={result.mean_confidence:.2f} ({processing_ms}ms)")
-
-    return result
