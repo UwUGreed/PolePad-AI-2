@@ -4,9 +4,6 @@ apps/cv-service/main.py
 YOLOv8 Detection Microservice
 Exposes:  POST /detect   →  CVDetectResponse
           GET  /health   →  {"status": "ok"}
-
-Input:  base64 image
-Output: bounding boxes, class labels, confidence scores
 """
 
 import os
@@ -21,9 +18,11 @@ from fastapi import FastAPI
 from PIL import Image
 import numpy as np
 
-sys.path.insert(0, "/app/packages/shared-types")
+# FIX: directory is packages/shared_types (underscore), not shared-types (hyphen)
+sys.path.insert(0, "/app/packages/shared_types")
 from schemas import (
-    CVDetectRequest, CVDetectResponse, TagDetection, AttributeDetection,
+    CVDetectRequest, CVDetectResponse, TagDetection,
+    AttributeDetection as SchemaAttributeDetection,
     BoundingBox, AttributeClass
 )
 
@@ -33,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="PolePad CV Service", version="1.0.0")
 
 # ─────────────────────────────────────────────────────────────
-# Model Loading
+# Model Config
 # ─────────────────────────────────────────────────────────────
 
 SAFETY_RELEVANT_CLASSES = {
@@ -42,9 +41,11 @@ SAFETY_RELEVANT_CLASSES = {
     AttributeClass.SAFETY_EQUIPMENT_MISSING,
 }
 
-# Class index → schema class (matches dataset.yaml order)
+# Matches dataset.yaml exactly:
+#   0: asset_tag  1: crossarm  2: vegetation_contact  3: guy_wire
+#   4: transformer  5: safety_equipment  6: structural_damage  7: safety_equipment_missing
 CLASS_MAP = {
-    0: "asset_tag",          # special — becomes TagDetection
+    0: "asset_tag",
     1: AttributeClass.CROSSARM,
     2: AttributeClass.VEGETATION_CONTACT,
     3: AttributeClass.GUY_WIRE,
@@ -68,7 +69,6 @@ def load_model():
             model = YOLO(model_path)
             log.info(f"[cv] Loaded model: {model_path} (version={model_version})")
         else:
-            # Demo mode: use a tiny pretrained model as placeholder
             log.warning(f"[cv] Model not found at {model_path}, loading YOLOv8n as demo")
             model = YOLO("yolov8n.pt")
             log.info("[cv] Demo model loaded (YOLOv8n pretrained)")
@@ -93,7 +93,7 @@ def decode_image(b64_string: str) -> np.ndarray:
 
 
 def mock_detect(image_array: np.ndarray) -> tuple[list, list]:
-    """Demo mode: return synthetic detections for judges to see the UI"""
+    """Demo mode: return synthetic detections so the UI works without real weights"""
     h, w = image_array.shape[:2]
     tags = [
         TagDetection(
@@ -102,7 +102,7 @@ def mock_detect(image_array: np.ndarray) -> tuple[list, list]:
         )
     ]
     attributes = [
-        AttributeDetection(
+        SchemaAttributeDetection(
             class_label=AttributeClass.GUY_WIRE,
             confidence=0.85,
             bounding_box=BoundingBox(x1=w*0.1, y1=h*0.4, x2=w*0.4, y2=h*0.9),
@@ -127,18 +127,17 @@ def run_yolo(image_array: np.ndarray) -> tuple[list, list]:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             bbox = BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2)
 
-            if cls_idx == 0:  # asset_tag
+            if cls_idx == 0:
                 tags.append(TagDetection(bounding_box=bbox, detection_confidence=conf))
             elif cls_idx in CLASS_MAP:
                 attr_class = CLASS_MAP[cls_idx]
-                attributes.append(AttributeDetection(
+                attributes.append(SchemaAttributeDetection(
                     class_label=attr_class,
                     confidence=conf,
                     bounding_box=bbox,
                     is_safety_relevant=attr_class in SAFETY_RELEVANT_CLASSES,
                 ))
 
-    # Fallback: if no tags detected, run mock for demo
     if not tags and not attributes:
         log.debug("[cv] No detections — using demo fallback")
         return mock_detect(image_array)
@@ -172,7 +171,6 @@ async def detect(request: CVDetectRequest):
     flags = []
     h, w = image_array.shape[:2]
 
-    # Quality check
     if h < 100 or w < 100:
         flags.append("low_resolution")
     if h * w > 25_000_000:

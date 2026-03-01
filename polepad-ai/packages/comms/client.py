@@ -2,25 +2,19 @@
 packages/comms/client.py
 
 Pre-coded communication layer between all PolePad services.
-This is the "wiring" — import and call, don't rewrite.
-
-Usage in api/:
-    from packages.comms.client import ServiceBus
-    bus = ServiceBus()
-    cv_result = await bus.cv.detect(image_bytes, job_id)
-    ocr_result = await bus.ocr.extract(cropped_bytes, job_id, bbox)
 """
 
 from __future__ import annotations
+import asyncio
 import base64
 import logging
 import time
 from typing import Optional
 import httpx
 
-# Import shared schemas — single source of truth
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared-types'))
+# FIX: directory is shared_types (underscore), not shared-types (hyphen)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared_types'))
 from schemas import (
     CVDetectRequest, CVDetectResponse,
     OCRExtractRequest, OCRExtractResponse,
@@ -31,7 +25,7 @@ log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────
-# Base HTTP Client with retry + error handling
+# Base HTTP Client
 # ─────────────────────────────────────────────────────────────
 
 class ServiceClient:
@@ -74,7 +68,7 @@ class ServiceClient:
                 log.warning(f"[{self.service_name}] Timeout (attempt {attempt+1}/{retries+1})")
                 if attempt < retries:
                     await asyncio.sleep(1.0 * (attempt + 1))
-            except httpx.ConnectError as e:
+            except httpx.ConnectError:
                 raise ServiceError(
                     service=self.service_name,
                     code="SERVICE_UNAVAILABLE",
@@ -120,25 +114,13 @@ class ServiceError(Exception):
 # ─────────────────────────────────────────────────────────────
 
 class CVServiceClient(ServiceClient):
-    """
-    Typed client for cv-service.
-    Wraps raw HTTP with schema validation.
-    """
-
     async def detect(self, image_bytes: bytes, image_id: str) -> CVDetectResponse:
-        """
-        Send image to cv-service for YOLO detection.
-        Returns typed CVDetectResponse with tags + attributes.
-        """
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
         request = CVDetectRequest(image_b64=image_b64, image_id=image_id)
         raw = await self.post("/detect", request.model_dump())
         return CVDetectResponse(**raw)
 
     async def batch_detect(self, images: list[tuple[bytes, str]]) -> list[CVDetectResponse]:
-        """
-        Detect multiple images. Runs sequentially (upgrade to /batch endpoint later).
-        """
         results = []
         for image_bytes, image_id in images:
             result = await self.detect(image_bytes, image_id)
@@ -151,20 +133,12 @@ class CVServiceClient(ServiceClient):
 # ─────────────────────────────────────────────────────────────
 
 class OCRServiceClient(ServiceClient):
-    """
-    Typed client for ocr-service.
-    """
-
     async def extract(
         self,
         cropped_image_bytes: bytes,
         image_id: str,
         original_bbox: BoundingBox
     ) -> OCRExtractResponse:
-        """
-        Send cropped tag image to ocr-service.
-        Returns typed OCRExtractResponse with character-level confidence.
-        """
         image_b64 = base64.b64encode(cropped_image_bytes).decode("utf-8")
         request = OCRExtractRequest(
             image_b64=image_b64,
@@ -178,9 +152,6 @@ class OCRServiceClient(ServiceClient):
         self,
         crops: list[tuple[bytes, str, BoundingBox]]
     ) -> list[OCRExtractResponse]:
-        """
-        Extract text from multiple tag crops.
-        """
         results = []
         for img_bytes, img_id, bbox in crops:
             result = await self.extract(img_bytes, img_id, bbox)
@@ -193,10 +164,6 @@ class OCRServiceClient(ServiceClient):
 # ─────────────────────────────────────────────────────────────
 
 class ArcGISClient(ServiceClient):
-    """
-    Client for Esri ArcGIS Enterprise Feature Service.
-    Pushes confirmed assets as GIS features.
-    """
     def __init__(self, base_url: str, username: str, password: str, feature_service_url: str):
         super().__init__(base_url, "arcgis")
         self.username = username
@@ -222,7 +189,6 @@ class ArcGISClient(ServiceClient):
         return self._token
 
     async def push_asset(self, normalized_tag: str, lat: float, lon: float, attributes: dict) -> bool:
-        """Push a confirmed asset to ArcGIS Feature Service"""
         if not all([lat, lon]):
             log.warning(f"[arcgis] Skipping {normalized_tag} — no GPS coordinates")
             return False
@@ -243,7 +209,6 @@ class ArcGISClient(ServiceClient):
         return success
 
     async def update_asset(self, object_id: int, attributes: dict) -> bool:
-        """Update an existing feature"""
         token = await self._get_token()
         feature = {"attributes": {"OBJECTID": object_id, **attributes}}
         client = await self._get_client()
@@ -255,22 +220,12 @@ class ArcGISClient(ServiceClient):
 
 
 class PISystemClient(ServiceClient):
-    """
-    Client for AVEVA PI System Web API.
-    Writes inspection events and attribute values.
-    """
     def __init__(self, base_url: str, username: str, password: str, database: str):
         super().__init__(base_url, "pi-system")
         self.database = database
         self.auth = (username, password)
 
-    async def write_inspection_event(
-        self,
-        normalized_tag: str,
-        event_data: dict,
-        start_time: str
-    ) -> bool:
-        """Create PI Event Frame for an inspection"""
+    async def write_inspection_event(self, normalized_tag: str, event_data: dict, start_time: str) -> bool:
         path = f"/assetdatabases/{self.database}/eventframes"
         payload = {
             "Name": f"Inspection_{normalized_tag}_{start_time}",
@@ -285,13 +240,7 @@ class PISystemClient(ServiceClient):
             log.error(f"[pi-system] Failed to write event for {normalized_tag}: {e}")
             return False
 
-    async def update_asset_attribute(
-        self,
-        normalized_tag: str,
-        attribute_name: str,
-        value
-    ) -> bool:
-        """Update a PI attribute value for an asset element"""
+    async def update_asset_attribute(self, normalized_tag: str, attribute_name: str, value) -> bool:
         path = f"/elements/path[\\\\{self.database}\\Poles\\{normalized_tag}]/attributes/{attribute_name}/value"
         payload = {"Value": value, "Timestamp": "*"}
         try:
@@ -303,10 +252,6 @@ class PISystemClient(ServiceClient):
 
 
 class SAPClient(ServiceClient):
-    """
-    Client for SAP / EpochField work order creation.
-    Triggered by safety-relevant attribute detections.
-    """
     def __init__(self, base_url: str, client_id: str, client_secret: str, plant: str):
         super().__init__(base_url, "sap")
         self.client_id = client_id
@@ -336,10 +281,6 @@ class SAPClient(ServiceClient):
         description: str,
         priority: str = "3"
     ) -> Optional[str]:
-        """
-        Create SAP PM work order for a safety-relevant finding.
-        Returns work order number or None on failure.
-        """
         token = await self._get_access_token()
         payload = {
             "Plant": self.plant,
@@ -348,7 +289,7 @@ class SAPClient(ServiceClient):
             "FunctionalLocation": normalized_tag,
             "Priority": priority,
             "LongText": description,
-            "UserStatus": "NOCO"  # Not confirmed
+            "UserStatus": "NOCO"
         }
         client = await self._get_client()
         try:
@@ -367,20 +308,10 @@ class SAPClient(ServiceClient):
 
 
 # ─────────────────────────────────────────────────────────────
-# ServiceBus — unified access point used by api/
+# ServiceBus
 # ─────────────────────────────────────────────────────────────
 
 class ServiceBus:
-    """
-    Single import for all inter-service communication.
-
-    Usage:
-        bus = ServiceBus.from_env()
-        cv_result = await bus.cv.detect(image_bytes, job_id)
-        ocr_result = await bus.ocr.extract(crop, job_id, bbox)
-        await bus.arcgis.push_asset(tag, lat, lon, attrs)   # if enabled
-    """
-
     def __init__(
         self,
         cv_url: str,
@@ -391,8 +322,6 @@ class ServiceBus:
     ):
         self.cv = CVServiceClient(cv_url, "cv-service")
         self.ocr = OCRServiceClient(ocr_url, "ocr-service")
-
-        # Integration clients — instantiated only if configured
         self.arcgis: Optional[ArcGISClient] = None
         self.pi: Optional[PISystemClient] = None
         self.sap: Optional[SAPClient] = None
@@ -400,19 +329,15 @@ class ServiceBus:
         if arcgis_config:
             self.arcgis = ArcGISClient(**arcgis_config)
             log.info("[comms] ArcGIS integration enabled")
-
         if pi_config:
             self.pi = PISystemClient(**pi_config)
             log.info("[comms] PI System integration enabled")
-
         if sap_config:
             self.sap = SAPClient(**sap_config)
             log.info("[comms] SAP integration enabled")
 
     @classmethod
     def from_env(cls) -> ServiceBus:
-        """Create ServiceBus from environment variables (used in production)"""
-        import os
         arcgis = None
         if os.getenv("ARCGIS_ENABLED", "false").lower() == "true":
             arcgis = {
@@ -446,7 +371,6 @@ class ServiceBus:
         )
 
     async def health_check(self) -> dict:
-        """Check all connected services"""
         return {
             "cv": await self.cv.health(),
             "ocr": await self.ocr.health(),
@@ -456,7 +380,6 @@ class ServiceBus:
         }
 
     async def close(self):
-        """Cleanup all HTTP clients"""
         await self.cv.close()
         await self.ocr.close()
         if self.arcgis:
@@ -477,20 +400,11 @@ def calculate_consensus_score(
     dispute_count: int,
     edit_count: int = 0
 ) -> tuple[float, str]:
-    """
-    Returns (composite_score, asset_status)
-
-    Formula:
-      - AI weight decreases as human validation accumulates
-      - Human signal = ratio of confirms weighted by validation volume
-    """
     total_validations = confirm_count + dispute_count + edit_count
 
-    # AI weight decreases with more human input (min 10%)
     ai_weight = max(0.10, 0.40 - (total_validations * 0.05))
     human_weight = 1.0 - ai_weight
 
-    # Human signal: confirm ratio × volume saturation (caps at 5 validators)
     if total_validations > 0:
         confirm_ratio = confirm_count / (confirm_count + dispute_count + edit_count)
         volume_factor = min(1.0, total_validations / 5.0)
@@ -501,7 +415,6 @@ def calculate_consensus_score(
     composite = (ai_weight * ai_confidence) + (human_weight * human_signal)
     composite = round(min(1.0, max(0.0, composite)), 4)
 
-    # Status logic
     if dispute_count >= 3:
         status = "disputed"
     elif composite >= 0.90 and confirm_count >= 3:

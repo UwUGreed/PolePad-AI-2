@@ -1,15 +1,14 @@
 """
-packages/shared-types/schemas.py
+packages/shared_types/schemas.py
 
 Single source of truth for all data contracts.
 Used by: api, cv-service, ocr-service, comms package.
-TypeScript equivalents auto-generated via scripts/gen_ts_types.py
 """
 
 from __future__ import annotations
 from enum import Enum
 from typing import Optional, List
-from pydantic import BaseModel, Field, UUID4
+from pydantic import BaseModel, Field
 from datetime import datetime
 
 
@@ -68,8 +67,9 @@ class BoundingBox(BaseModel):
     height: float = Field(default=0)
 
     def model_post_init(self, __context):
-        object.__setattr__(self, "width", self.x2 - self.x1)
-        object.__setattr__(self, "height", self.y2 - self.y1)
+        # Use regular assignment — model is not frozen
+        self.width = self.x2 - self.x1
+        self.height = self.y2 - self.y1
 
 class GeoPoint(BaseModel):
     lat: Optional[float] = None
@@ -115,7 +115,12 @@ class OCRExtractRequest(BaseModel):
     """POST /extract on ocr-service"""
     image_b64: str = Field(..., description="Base64-encoded cropped tag image")
     image_id: str
-    original_bounding_box: BoundingBox = Field(..., description="Position in original image for reference")
+    # FIX: Made optional — ocr-service doesn't use it and api reconstructs
+    # responses from DB without the original bbox available
+    original_bounding_box: Optional[BoundingBox] = Field(
+        default=None,
+        description="Position in original image for reference (optional)"
+    )
 
 class CharacterConfidence(BaseModel):
     char: str
@@ -134,6 +139,8 @@ class OCRExtractResponse(BaseModel):
     mean_confidence: float
     preprocessing_applied: List[str] = Field(default_factory=list)
     processing_ms: int = 0
+    # FIX: Not included in DB storage or api reconstruction — must be optional
+    original_bounding_box: Optional[BoundingBox] = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -194,23 +201,20 @@ class AssetDetail(AssetSummary):
 # ─────────────────────────────────────────────────────────────
 
 class ArcGISFeature(BaseModel):
-    """Mapped to ArcGIS Feature Service point layer"""
-    geometry: dict  # {"x": lon, "y": lat, "spatialReference": {"wkid": 4326}}
-    attributes: dict  # all asset fields
+    geometry: dict
+    attributes: dict
 
 class PIEventData(BaseModel):
-    """Mapped to AVEVA PI Event Frame"""
-    element_path: str  # e.g. \\AF_SERVER\PolePad\Poles\TP-1042-A
+    element_path: str
     event_name: str
     start_time: datetime
-    attributes: dict  # PI tag name → value
+    attributes: dict
 
 class SAPWorkOrderRequest(BaseModel):
-    """SAP PM work order creation payload"""
     plant: str
     order_type: str
     short_description: str
-    equipment_id: str  # normalized_tag as functional location
+    equipment_id: str
     priority: str = "3"
     long_text: str = ""
 
