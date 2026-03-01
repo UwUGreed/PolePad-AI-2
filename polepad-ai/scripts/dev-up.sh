@@ -5,6 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [[ ! -f ".env" && -f ".env.example" ]]; then
+  cp .env.example .env
+  echo "Created .env from .env.example"
+fi
+
 if [[ -f "GridstormFrontEnd/package.json" ]]; then
   FRONTEND_DIR="GridstormFrontEnd"
 elif [[ -f "tyler_frontend/package.json" ]]; then
@@ -17,6 +22,10 @@ if command -v podman-compose >/dev/null 2>&1; then
   COMPOSE_CMD=(podman-compose)
 elif command -v docker >/dev/null 2>&1; then
   COMPOSE_CMD=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+  COMPOSE_CMD=(docker-compose)
+else
+  echo "ERROR: Neither podman-compose, docker compose, nor docker-compose is installed." >&2
 else
   echo "ERROR: Neither podman-compose nor docker compose is installed." >&2
   exit 1

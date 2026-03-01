@@ -1,93 +1,76 @@
-"""
-apps/api/main.py
-
-PolePad AI — FastAPI Backend
-"""
+from __future__ import annotations
 
 import os
 import uuid
 import logging
+import re
+from datetime import datetime, timezone
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy import select, update
 
 import sys
-# FIX: directory is packages/shared_types (underscore), not shared-types (hyphen)
 sys.path.insert(0, "/app/packages/shared_types")
 sys.path.insert(0, "/app/packages/comms")
 sys.path.insert(0, "/app/packages/db")
 
 from schemas import (
     UploadResponse, InferenceResult, ValidationRequest, ValidationResponse,
-    AssetSummary, InspectionStatus, AssetStatus, ValidationAction,
+    AssetSummary, InspectionStatus, ValidationAction,
     OCRExtractResponse, CharacterConfidence,
     AttributeDetection as SchemaAttributeDetection,
-    BoundingBox, AttributeClass
+    BoundingBox, AttributeClass,
+    InspectionSummary, InspectionEditRequest, ReviewerActionResponse, FlagSummary,
 )
 from client import ServiceBus, calculate_consensus_score
 from models import (
     Asset, Inspection, ExtractedTag,
     AttributeDetection as DBAttributeDetection,
-    UserValidation, ConsensusScore, InspectionJob, Base
+    UserValidation, ConsensusScore, InspectionJob, Base, Flag,
 )
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# ─────────────────────────────────────────────────────────────
-# DB Setup
-# ─────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ["DATABASE_URL"]
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
-async def get_db():
-    async with SessionLocal() as session:
-        yield session
 
-# ─────────────────────────────────────────────────────────────
-# Service Bus
-# ─────────────────────────────────────────────────────────────
-bus: Optional[ServiceBus] = None
+def sanitize_filename(name: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", name or "upload.jpg")
+    return base[:120]
 
-def get_bus() -> ServiceBus:
-    return bus
 
-# ─────────────────────────────────────────────────────────────
-# Image Storage
-# ─────────────────────────────────────────────────────────────
-def save_image(image_bytes: bytes, job_id: str) -> str:
-    backend = os.getenv("IMAGE_STORAGE_BACKEND", "local")
-    if backend == "s3":
-        import boto3
-        s3 = boto3.client("s3")
-        key = f"inspections/{job_id}/raw.jpg"
-        bucket = os.environ["S3_BUCKET_NAME"]
-        s3.put_object(Bucket=bucket, Key=key, Body=image_bytes, ContentType="image/jpeg")
-        return f"s3://{bucket}/{key}"
-    else:
-        image_dir = os.getenv("LOCAL_IMAGE_DIR", "/data/images")
-        os.makedirs(image_dir, exist_ok=True)
-        path = f"{image_dir}/{job_id}.jpg"
-        with open(path, "wb") as f:
-            f.write(image_bytes)
-        return f"local://{path}"
+def _relative_image_path(job_id: str, filename: str) -> str:
+    now = datetime.now(timezone.utc)
+    ext = Path(filename).suffix.lower() or ".jpg"
+    safe = sanitize_filename(Path(filename).stem)
+    return f"inspections/{now:%Y/%m}/{job_id}_{safe}{ext}"
 
-def load_image(key: str) -> bytes:
-    if key.startswith("s3://"):
-        import boto3
-        s3 = boto3.client("s3")
-        parts = key[5:].split("/", 1)
-        obj = s3.get_object(Bucket=parts[0], Key=parts[1])
-        return obj["Body"].read()
-    else:
-        path = key.replace("local://", "")
-        with open(path, "rb") as f:
-            return f.read()
+
+def save_image(image_bytes: bytes, job_id: str, filename: str) -> str:
+    image_dir = Path(os.getenv("LOCAL_IMAGE_DIR", "/data/images"))
+    rel = _relative_image_path(job_id, filename)
+    out = image_dir / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(image_bytes)
+    return rel
+
+
+def load_image(rel: str) -> bytes:
+    image_dir = Path(os.getenv("LOCAL_IMAGE_DIR", "/data/images"))
+    p = (image_dir / rel).resolve()
+    if not str(p).startswith(str(image_dir.resolve())):
+        raise HTTPException(400, "Invalid path")
+    return p.read_bytes()
+
 
 def crop_image(image_bytes: bytes, bbox: dict) -> bytes:
     from PIL import Image
@@ -98,36 +81,30 @@ def crop_image(image_bytes: bytes, bbox: dict) -> bytes:
     cropped.save(buf, format="JPEG")
     return buf.getvalue()
 
-# ─────────────────────────────────────────────────────────────
-# Lifespan
-# ─────────────────────────────────────────────────────────────
+
+async def get_db():
+    async with SessionLocal() as session:
+        yield session
+
+
+bus: Optional[ServiceBus] = None
+
+def get_bus() -> ServiceBus:
+    return bus
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global bus
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-
     bus = ServiceBus.from_env()
-    log.info("Service bus initialized")
-
-    health = await bus.health_check()
-    log.info(f"Service health: {health}")
-
     yield
-
     await bus.close()
     await engine.dispose()
 
-# ─────────────────────────────────────────────────────────────
-# App
-# ─────────────────────────────────────────────────────────────
-app = FastAPI(
-    title="PolePad AI",
-    description="Crowd-Powered Infrastructure Verification",
-    version="1.0.0",
-    lifespan=lifespan
-)
 
+app = FastAPI(title="PolePad AI", version="1.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(","),
@@ -136,20 +113,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─────────────────────────────────────────────────────────────
-# Health
-# ─────────────────────────────────────────────────────────────
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "polepad-api"}
 
-@app.get("/api/v1/services/health")
-async def services_health(b: ServiceBus = Depends(get_bus)):
-    return await b.health_check()
 
-# ─────────────────────────────────────────────────────────────
-# Upload + Inference
-# ─────────────────────────────────────────────────────────────
+@app.get("/images/{relative_path:path}")
+async def image(relative_path: str):
+    image_dir = Path(os.getenv("LOCAL_IMAGE_DIR", "/data/images")).resolve()
+    target = (image_dir / relative_path).resolve()
+    if not str(target).startswith(str(image_dir)) or not target.exists():
+        raise HTTPException(404, "Image not found")
+    return FileResponse(target)
+
+
 @app.post("/api/v1/inspections/upload", response_model=UploadResponse)
 async def upload_inspection(
     background_tasks: BackgroundTasks,
@@ -157,134 +135,103 @@ async def upload_inspection(
     asset_id: Optional[str] = Form(None),
     lat: Optional[float] = Form(None),
     lon: Optional[float] = Form(None),
+    county_id: Optional[str] = Form(None),
+    uploader_user: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
     b: ServiceBus = Depends(get_bus),
 ):
-    if file.content_type not in ("image/jpeg", "image/png", "image/heic", "image/webp"):
-        raise HTTPException(400, "Unsupported image type. Use JPEG, PNG, or WEBP.")
-
     image_bytes = await file.read()
-    if len(image_bytes) > 20 * 1024 * 1024:
-        raise HTTPException(400, "Image too large. Max 20MB.")
-
     job_id = str(uuid.uuid4())
-    image_key = save_image(image_bytes, job_id)
+    rel_path = save_image(image_bytes, job_id, file.filename or "upload.jpg")
 
     inspection = Inspection(
         id=job_id,
-        image_s3_key=image_key,
         asset_id=asset_id,
+        image_s3_key=rel_path,
+        original_filename=file.filename,
         status=InspectionStatus.QUEUED,
+        county_id=county_id,
+        uploader_user=uploader_user,
     )
     db.add(inspection)
-    job = InspectionJob(id=job_id, inspection_id=job_id, status="queued")
-    db.add(job)
+    db.add(InspectionJob(id=job_id, inspection_id=job_id, status="queued"))
     await db.commit()
 
-    background_tasks.add_task(
-        run_inference_pipeline,
-        job_id=job_id,
-        image_bytes=image_bytes,
-        image_key=image_key,
-        lat=lat,
-        lon=lon,
-        bus=b
-    )
-
-    return UploadResponse(
-        job_id=job_id,
-        status=InspectionStatus.QUEUED,
-        poll_url=f"/api/v1/jobs/{job_id}"
-    )
+    background_tasks.add_task(run_inference_pipeline, job_id, image_bytes, lat, lon, b)
+    return UploadResponse(job_id=job_id, status=InspectionStatus.QUEUED, poll_url=f"/api/v1/jobs/{job_id}")
 
 
-async def run_inference_pipeline(
-    job_id: str,
-    image_bytes: bytes,
-    image_key: str,
-    lat: Optional[float],
-    lon: Optional[float],
-    bus: ServiceBus
-):
+async def _upsert_asset_for_tag(db: AsyncSession, normalized_tag: str, inspection: Inspection, lat: Optional[float], lon: Optional[float]):
+    found = await db.execute(select(Asset).where(Asset.normalized_tag == normalized_tag))
+    asset = found.scalar_one_or_none()
+    if asset is None:
+        asset = Asset(
+            normalized_tag=normalized_tag,
+            asset_type=inspection.pole_material or "unknown",
+            vegetation=inspection.vegetation,
+            county_id=inspection.county_id,
+            location_lat=lat,
+            location_lon=lon,
+            status="active",
+            last_inspection_id=inspection.id,
+            last_inspection_date=inspection.created_at,
+        )
+        db.add(asset)
+        await db.flush()
+        db.add(ConsensusScore(asset_id=asset.id, composite_score=inspection.overall_confidence))
+        return asset, False
+    return asset, True
+
+
+def _mismatch_fields(asset: Asset, inspection: Inspection) -> list[str]:
+    fields: list[str] = []
+    if asset.asset_type not in (None, "unknown") and inspection.pole_material not in (None, "unknown") and asset.asset_type != inspection.pole_material:
+        fields.append("asset_type")
+    if asset.vegetation is not None and inspection.vegetation is not None and asset.vegetation != inspection.vegetation:
+        fields.append("vegetation")
+    if asset.county_id and inspection.county_id and asset.county_id != inspection.county_id:
+        fields.append("county_id")
+    return fields
+
+
+async def run_inference_pipeline(job_id: str, image_bytes: bytes, lat: Optional[float], lon: Optional[float], bus: ServiceBus):
     async with SessionLocal() as db:
         try:
-            await db.execute(
-                update(Inspection).where(Inspection.id == job_id)
-                .values(status=InspectionStatus.PROCESSING)
-            )
-            # FIX: mark job as processing
-            await db.execute(
-                update(InspectionJob).where(InspectionJob.id == job_id)
-                .values(status="processing")
-            )
+            await db.execute(update(Inspection).where(Inspection.id == job_id).values(status=InspectionStatus.PROCESSING))
+            await db.execute(update(InspectionJob).where(InspectionJob.id == job_id).values(status="processing"))
             await db.commit()
 
+            insp = (await db.execute(select(Inspection).where(Inspection.id == job_id))).scalar_one()
             cv_result = await bus.cv.detect(image_bytes, job_id)
-
-            if not cv_result.tags and not cv_result.attributes:
-                await db.execute(
-                    update(Inspection).where(Inspection.id == job_id)
-                    .values(
-                        status=InspectionStatus.NO_TAG_DETECTED,
-                        model_version_cv=cv_result.model_version,
-                        flags=["no_tag_detected"]
-                    )
-                )
-                # FIX: mark job complete even when no tag found
-                await db.execute(
-                    update(InspectionJob).where(InspectionJob.id == job_id)
-                    .values(status="complete")
-                )
-                await db.commit()
-                return
-
-            ocr_results = []
-            for tag_det in cv_result.tags:
+            tag_det = cv_result.tags[0] if cv_result.tags else None
+            if tag_det:
                 crop = crop_image(image_bytes, tag_det.bounding_box.model_dump())
                 ocr_result = await bus.ocr.extract(crop, job_id, tag_det.bounding_box)
-                ocr_results.append((tag_det, ocr_result))
+            else:
+                ocr_result = await bus.ocr.extract(image_bytes, job_id, None)
 
-            confidences = []
-            for tag_det, ocr_res in ocr_results:
-                combined = (tag_det.detection_confidence * 0.4) + (ocr_res.mean_confidence * 0.6)
-                confidences.append(combined)
-            overall_conf = sum(confidences) / len(confidences) if confidences else 0.0
+            vegetation = any(a.class_label == AttributeClass.VEGETATION_CONTACT for a in cv_result.attributes)
+            overall_conf = ocr_result.mean_confidence if ocr_result.normalized_string else 0.0
 
-            primary_tag = ocr_results[0][1].normalized_string if ocr_results else None
-            asset_id = None
-            if primary_tag:
-                asset_result = await db.execute(
-                    select(Asset).where(Asset.normalized_tag == primary_tag)
-                )
-                asset = asset_result.scalar_one_or_none()
-                if not asset:
-                    asset = Asset(
-                        normalized_tag=primary_tag,
-                        location_lat=lat,
-                        location_lon=lon,
-                        status="pending",
-                        consensus_score=overall_conf * 0.4,
-                    )
-                    db.add(asset)
-                    await db.flush()
-                    db.add(ConsensusScore(asset_id=asset.id, composite_score=overall_conf * 0.4))
-                asset_id = asset.id
+            insp.pole_material = cv_result.pole_material or "unknown"
+            insp.vegetation = vegetation
+            insp.model_version_cv = cv_result.model_version
+            insp.model_version_ocr = ocr_result.model_version
+            insp.overall_confidence = overall_conf
+            insp.normalized_tag_candidate = ocr_result.normalized_string or None
 
-            flags = []
-            for tag_det, ocr_res in ocr_results:
-                db.add(ExtractedTag(
-                    inspection_id=job_id,
-                    raw_ocr_string=ocr_res.raw_string,
-                    normalized_string=ocr_res.normalized_string,
-                    character_confidences=[c.model_dump() for c in ocr_res.character_confidences],
-                    uncertain_positions=ocr_res.uncertain_positions,
-                    bounding_box=tag_det.bounding_box.model_dump(),
-                    ocr_confidence=ocr_res.mean_confidence,
-                    detection_confidence=tag_det.detection_confidence,
-                    preprocessing_flags=ocr_res.preprocessing_applied,
-                ))
-                if ocr_res.uncertain_positions:
-                    flags.append(f"uncertain_chars_at_{ocr_res.uncertain_positions}")
+            bbox_payload = tag_det.bounding_box.model_dump() if tag_det else BoundingBox(x1=0, y1=0, x2=0, y2=0).model_dump()
+            db.add(ExtractedTag(
+                inspection_id=job_id,
+                raw_ocr_string=ocr_result.raw_string,
+                normalized_string=ocr_result.normalized_string,
+                character_confidences=[c.model_dump() for c in ocr_result.character_confidences],
+                uncertain_positions=ocr_result.uncertain_positions,
+                bounding_box=bbox_payload,
+                ocr_confidence=ocr_result.mean_confidence,
+                detection_confidence=tag_det.detection_confidence if tag_det else 0.0,
+                preprocessing_flags=ocr_result.preprocessing_applied,
+            ))
 
             for attr in cv_result.attributes:
                 db.add(DBAttributeDetection(
@@ -294,123 +241,75 @@ async def run_inference_pipeline(
                     bounding_box=attr.bounding_box.model_dump(),
                     is_safety_relevant=attr.is_safety_relevant,
                 ))
-                if attr.is_safety_relevant:
-                    flags.append(f"safety_relevant:{attr.class_label}")
 
-            await db.execute(
-                update(Inspection).where(Inspection.id == job_id).values(
-                    asset_id=asset_id,
-                    status=InspectionStatus.COMPLETE,
-                    overall_confidence=overall_conf,
-                    model_version_cv=cv_result.model_version,
-                    model_version_ocr=ocr_results[0][1].model_version if ocr_results else "unknown",
-                    flags=flags,
-                )
-            )
-            # FIX: mark job complete
-            await db.execute(
-                update(InspectionJob).where(InspectionJob.id == job_id)
-                .values(status="complete")
-            )
+            if not ocr_result.normalized_string:
+                insp.status = InspectionStatus.MANUAL_REVIEW
+                await db.execute(update(InspectionJob).where(InspectionJob.id == job_id).values(status="complete"))
+                await db.commit()
+                return
+
+            asset, existed = await _upsert_asset_for_tag(db, ocr_result.normalized_string, insp, lat, lon)
+            insp.asset_id = asset.id
+
+            if existed:
+                mismatches = _mismatch_fields(asset, insp)
+                if mismatches:
+                    flag = Flag(asset_id=asset.id, inspection_id=insp.id, status="open", mismatch_fields=mismatches)
+                    db.add(flag)
+                    await db.flush()
+                    asset.current_flag_id = flag.id
+                    insp.flags = [f"mismatch:{m}" for m in mismatches]
+                    insp.status = InspectionStatus.FLAGGED
+                else:
+                    insp.status = InspectionStatus.PROCESSED
+                    asset.last_inspection_id = insp.id
+                    asset.last_inspection_date = insp.created_at
+                    if asset.asset_type in (None, "unknown") and insp.pole_material not in (None, "unknown"):
+                        asset.asset_type = insp.pole_material
+                    if asset.vegetation is None:
+                        asset.vegetation = insp.vegetation
+                    if not asset.county_id:
+                        asset.county_id = insp.county_id
+            else:
+                insp.status = InspectionStatus.PROCESSED
+
+            await db.execute(update(InspectionJob).where(InspectionJob.id == job_id).values(status="complete"))
+            await db.commit()
+        except Exception as e:
+            log.exception("pipeline failed: %s", e)
+            await db.execute(update(Inspection).where(Inspection.id == job_id).values(status=InspectionStatus.FAILED))
+            await db.execute(update(InspectionJob).where(InspectionJob.id == job_id).values(status="failed", error_message=str(e)))
             await db.commit()
 
-            if asset_id and primary_tag:
-                await _push_to_integrations(bus, primary_tag, lat, lon, overall_conf, cv_result.attributes)
 
-            log.info(f"[pipeline] Job {job_id} complete — tag={primary_tag} confidence={overall_conf:.2f}")
-
-        except Exception as e:
-            log.exception(f"[pipeline] Job {job_id} failed: {e}")
-            async with SessionLocal() as err_db:
-                await err_db.execute(
-                    update(Inspection).where(Inspection.id == job_id)
-                    .values(status=InspectionStatus.FAILED)
-                )
-                await err_db.execute(
-                    update(InspectionJob).where(InspectionJob.id == job_id)
-                    .values(status="failed", error_message=str(e))
-                )
-                await err_db.commit()
-
-
-async def _push_to_integrations(bus, tag, lat, lon, confidence, attributes):
-    if bus.arcgis and lat and lon:
-        try:
-            await bus.arcgis.push_asset(tag, lat, lon, {
-                "tag_id": tag, "confidence": confidence, "status": "pending"
-            })
-        except Exception as e:
-            log.warning(f"[arcgis] Push failed for {tag}: {e}")
-
-    if bus.sap:
-        trigger_classes = os.getenv(
-            "SAP_TRIGGER_CLASSES",
-            "vegetation_contact,safety_equipment_missing"
-        ).split(",")
-        for attr in attributes:
-            if attr.is_safety_relevant and attr.class_label in trigger_classes:
-                try:
-                    await bus.sap.create_work_order(
-                        normalized_tag=tag,
-                        attribute_class=attr.class_label,
-                        description=f"PolePad AI detected {attr.class_label} at pole {tag} "
-                                    f"with {attr.confidence:.0%} confidence.",
-                        priority="2"
-                    )
-                except Exception as e:
-                    log.warning(f"[sap] WO creation failed: {e}")
-
-# ─────────────────────────────────────────────────────────────
-# Job Status
-# ─────────────────────────────────────────────────────────────
 @app.get("/api/v1/jobs/{job_id}", response_model=InferenceResult)
 async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Inspection).where(Inspection.id == job_id)
-    )
-    inspection = result.scalar_one_or_none()
+    inspection = (await db.execute(select(Inspection).where(Inspection.id == job_id))).scalar_one_or_none()
     if not inspection:
         raise HTTPException(404, "Job not found")
+    db_tags = (await db.execute(select(ExtractedTag).where(ExtractedTag.inspection_id == job_id))).scalars().all()
+    db_attrs = (await db.execute(select(DBAttributeDetection).where(DBAttributeDetection.inspection_id == job_id))).scalars().all()
 
-    # FIX: fetch tags from DB (previously returned empty list always)
-    tags_result = await db.execute(
-        select(ExtractedTag).where(ExtractedTag.inspection_id == job_id)
-    )
-    db_tags = tags_result.scalars().all()
-
-    # FIX: fetch attributes from DB (previously returned empty list always)
-    attrs_result = await db.execute(
-        select(DBAttributeDetection).where(DBAttributeDetection.inspection_id == job_id)
-    )
-    db_attrs = attrs_result.scalars().all()
-
-    # Reconstruct OCRExtractResponse — original_bounding_box is now Optional so this is safe
     tags_out = []
     for t in db_tags:
-        char_confs = [
-            CharacterConfidence(**c) if isinstance(c, dict) else c
-            for c in (t.character_confidences or [])
-        ]
+        char_confs = [CharacterConfidence(**c) if isinstance(c, dict) else c for c in (t.character_confidences or [])]
         tags_out.append(OCRExtractResponse(
             image_id=job_id,
-            model_version=inspection.model_version_ocr or "unknown",
+            model_version=inspection.model_version_ocr,
             raw_string=t.raw_ocr_string,
             normalized_string=t.normalized_string,
             character_confidences=char_confs,
             uncertain_positions=t.uncertain_positions or [],
             mean_confidence=t.ocr_confidence,
             preprocessing_applied=t.preprocessing_flags or [],
-            # original_bounding_box intentionally omitted — it's Optional now
         ))
 
-    # Reconstruct attribute detections
     attrs_out = []
     for a in db_attrs:
-        bbox_data = a.bounding_box if isinstance(a.bounding_box, dict) else {}
         attrs_out.append(SchemaAttributeDetection(
             class_label=AttributeClass(a.class_label),
             confidence=a.confidence,
-            bounding_box=BoundingBox(**bbox_data),
+            bounding_box=BoundingBox(**a.bounding_box),
             is_safety_relevant=a.is_safety_relevant,
         ))
 
@@ -419,42 +318,21 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
         status=inspection.status,
         inspection_id=inspection.id,
         asset_id=inspection.asset_id,
-        model_versions={
-            "cv": inspection.model_version_cv,
-            "ocr": inspection.model_version_ocr
-        },
+        model_versions={"cv": inspection.model_version_cv, "ocr": inspection.model_version_ocr},
         tags=tags_out,
         attributes=attrs_out,
-        overall_confidence=inspection.overall_confidence or 0.0,
+        pole_material=inspection.pole_material,
+        overall_confidence=inspection.overall_confidence,
         flags=inspection.flags or [],
     )
 
-# ─────────────────────────────────────────────────────────────
-# Validation
-# ─────────────────────────────────────────────────────────────
+
 @app.post("/api/v1/inspections/{inspection_id}/validate", response_model=ValidationResponse)
-async def validate_inspection(
-    inspection_id: str,
-    body: ValidationRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(Inspection).where(Inspection.id == inspection_id))
-    inspection = result.scalar_one_or_none()
+async def validate_inspection(inspection_id: str, body: ValidationRequest, db: AsyncSession = Depends(get_db)):
+    inspection = (await db.execute(select(Inspection).where(Inspection.id == inspection_id))).scalar_one_or_none()
     if not inspection:
         raise HTTPException(404, "Inspection not found")
-
-    # MVP: single shared demo user (no auth yet)
     demo_user_id = "00000000-0000-0000-0000-000000000001"
-
-    existing = await db.execute(
-        select(UserValidation).where(
-            UserValidation.inspection_id == inspection_id,
-            UserValidation.user_id == demo_user_id
-        )
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(409, "You have already validated this inspection")
-
     validation = UserValidation(
         inspection_id=inspection_id,
         user_id=demo_user_id,
@@ -465,81 +343,114 @@ async def validate_inspection(
     )
     db.add(validation)
     await db.flush()
-
+    new_score = 0.0
+    new_status = "pending"
     if inspection.asset_id:
-        validations_result = await db.execute(
-            select(UserValidation).where(UserValidation.inspection_id == inspection_id)
-        )
-        all_v = validations_result.scalars().all()
-        confirms = sum(1 for v in all_v if v.action == ValidationAction.CONFIRM)
-        disputes = sum(1 for v in all_v if v.action == ValidationAction.DISPUTE)
-        edits = sum(1 for v in all_v if v.action == ValidationAction.EDIT)
-
-        new_score, new_status = calculate_consensus_score(
-            ai_confidence=inspection.overall_confidence,
-            confirm_count=confirms,
-            dispute_count=disputes,
-            edit_count=edits
-        )
-
-        await db.execute(
-            update(Asset).where(Asset.id == inspection.asset_id)
-            .values(consensus_score=new_score, status=new_status)
-        )
-        await db.execute(
-            update(ConsensusScore).where(ConsensusScore.asset_id == inspection.asset_id)
-            .values(
-                confirm_count=confirms,
-                dispute_count=disputes,
-                edit_count=edits,
-                composite_score=new_score
-            )
-        )
-    else:
-        new_score = 0.0
-        new_status = "pending"
-
+        vals = (await db.execute(select(UserValidation).where(UserValidation.inspection_id == inspection_id))).scalars().all()
+        confirms = sum(1 for v in vals if v.action == ValidationAction.CONFIRM)
+        disputes = sum(1 for v in vals if v.action == ValidationAction.DISPUTE)
+        edits = sum(1 for v in vals if v.action == ValidationAction.EDIT)
+        new_score, new_status = calculate_consensus_score(inspection.overall_confidence, confirms, disputes, edits)
+        await db.execute(update(Asset).where(Asset.id == inspection.asset_id).values(consensus_score=new_score, status=new_status))
     await db.commit()
+    return ValidationResponse(validation_id=validation.id, inspection_id=inspection_id, new_consensus_score=new_score, asset_status=new_status)
 
-    return ValidationResponse(
-        validation_id=validation.id,
-        inspection_id=inspection_id,
-        new_consensus_score=new_score,
-        asset_status=new_status,
+
+@app.get("/api/v1/assets", response_model=list[AssetSummary])
+async def list_assets(db: AsyncSession = Depends(get_db)):
+    assets = (await db.execute(select(Asset).order_by(Asset.created_at.desc()))).scalars().all()
+    return [AssetSummary(
+        id=a.id, normalized_tag=a.normalized_tag, asset_type=a.asset_type,
+        vegetation=a.vegetation, county_id=a.county_id, status=a.status,
+        consensus_score=a.consensus_score,
+        location={"lat": a.location_lat, "lon": a.location_lon} if a.location_lat and a.location_lon else None,
+    ) for a in assets]
+
+
+@app.get("/api/v1/inspections", response_model=list[InspectionSummary])
+async def list_inspections(status: Optional[str] = None, db: AsyncSession = Depends(get_db)):
+    q = select(Inspection)
+    if status:
+        q = q.where(Inspection.status == status)
+    rows = (await db.execute(q.order_by(Inspection.created_at.desc()))).scalars().all()
+    return [InspectionSummary(
+        id=i.id, asset_id=i.asset_id, normalized_tag_candidate=i.normalized_tag_candidate,
+        status=i.status, pole_material=i.pole_material, vegetation=i.vegetation,
+        county_id=i.county_id, created_at=i.created_at,
+    ) for i in rows]
+
+
+@app.get("/api/v1/inspections/{inspection_id}", response_model=InspectionSummary)
+async def get_inspection(inspection_id: str, db: AsyncSession = Depends(get_db)):
+    i = (await db.execute(select(Inspection).where(Inspection.id == inspection_id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Inspection not found")
+    return InspectionSummary(
+        id=i.id, asset_id=i.asset_id, normalized_tag_candidate=i.normalized_tag_candidate,
+        status=i.status, pole_material=i.pole_material, vegetation=i.vegetation,
+        county_id=i.county_id, created_at=i.created_at,
     )
 
-# ─────────────────────────────────────────────────────────────
-# Assets
-# ─────────────────────────────────────────────────────────────
-@app.get("/api/v1/assets", response_model=list[AssetSummary])
-async def list_assets(
-    status: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
-    db: AsyncSession = Depends(get_db)
-):
-    query = select(Asset).where(Asset.deleted_at.is_(None))
-    if status:
-        query = query.where(Asset.status == status)
-    query = query.order_by(Asset.updated_at.desc()).limit(limit).offset(offset)
-    result = await db.execute(query)
-    assets = result.scalars().all()
-    return [
-        AssetSummary(
-            id=a.id,
-            normalized_tag=a.normalized_tag,
-            asset_type=a.asset_type,
-            status=a.status,
-            consensus_score=a.consensus_score,
-            location={"lat": a.location_lat, "lon": a.location_lon} if a.location_lat else None,
-        )
-        for a in assets
-    ]
 
-@app.get("/api/v1/assets/{asset_id}")
-async def get_asset(asset_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Asset).where(Asset.id == asset_id))
-    asset = result.scalar_one_or_none()
-    if not asset:
-        raise HTTPException(404, "Asset not found")
-    return asset
+@app.post("/api/v1/inspections/{inspection_id}/edit", response_model=ReviewerActionResponse)
+async def edit_inspection(inspection_id: str, body: InspectionEditRequest, db: AsyncSession = Depends(get_db)):
+    i = (await db.execute(select(Inspection).where(Inspection.id == inspection_id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Inspection not found")
+    if body.normalized_tag is not None:
+        i.normalized_tag_candidate = body.normalized_tag
+    if body.pole_material is not None:
+        i.pole_material = body.pole_material
+    if body.vegetation is not None:
+        i.vegetation = body.vegetation
+    if body.county_id is not None:
+        i.county_id = body.county_id
+    await db.commit()
+    return ReviewerActionResponse(inspection_id=i.id, status=i.status, asset_id=i.asset_id)
+
+
+@app.post("/api/v1/inspections/{inspection_id}/promote", response_model=ReviewerActionResponse)
+async def promote_inspection(inspection_id: str, reviewer: str = Form("reviewer"), db: AsyncSession = Depends(get_db)):
+    i = (await db.execute(select(Inspection).where(Inspection.id == inspection_id))).scalar_one_or_none()
+    if not i or not i.asset_id:
+        raise HTTPException(404, "Inspection or asset not found")
+    asset = (await db.execute(select(Asset).where(Asset.id == i.asset_id))).scalar_one()
+    asset.asset_type = i.pole_material or asset.asset_type
+    asset.vegetation = i.vegetation
+    asset.county_id = i.county_id
+    asset.last_inspection_id = i.id
+    asset.last_inspection_date = i.created_at
+    i.status = InspectionStatus.PROCESSED
+    flag = (await db.execute(select(Flag).where(Flag.inspection_id == i.id, Flag.status == "open"))).scalar_one_or_none()
+    if flag:
+        flag.status = "resolved"
+        flag.resolved_by = reviewer
+        flag.resolved_at = datetime.now(timezone.utc)
+        asset.current_flag_id = None
+    await db.commit()
+    return ReviewerActionResponse(inspection_id=i.id, status=i.status, asset_id=asset.id, flag_id=flag.id if flag else None)
+
+
+@app.post("/api/v1/inspections/{inspection_id}/dismiss", response_model=ReviewerActionResponse)
+async def dismiss_inspection(inspection_id: str, reviewer: str = Form("reviewer"), note: str = Form(""), db: AsyncSession = Depends(get_db)):
+    i = (await db.execute(select(Inspection).where(Inspection.id == inspection_id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Inspection not found")
+    i.status = InspectionStatus.PROCESSED
+    flag = (await db.execute(select(Flag).where(Flag.inspection_id == i.id, Flag.status == "open"))).scalar_one_or_none()
+    if flag:
+        flag.status = "dismissed"
+        flag.resolved_by = reviewer
+        flag.resolution_note = note
+        flag.resolved_at = datetime.now(timezone.utc)
+    await db.commit()
+    return ReviewerActionResponse(inspection_id=i.id, status=i.status, asset_id=i.asset_id, flag_id=flag.id if flag else None)
+
+
+@app.get("/api/v1/flags", response_model=list[FlagSummary])
+async def list_flags(status: str = "open", db: AsyncSession = Depends(get_db)):
+    flags = (await db.execute(select(Flag).where(Flag.status == status).order_by(Flag.created_at.desc()))).scalars().all()
+    return [FlagSummary(
+        id=f.id, asset_id=f.asset_id, inspection_id=f.inspection_id,
+        status=f.status, reason=f.reason, mismatch_fields=f.mismatch_fields or [], created_at=f.created_at,
+    ) for f in flags]

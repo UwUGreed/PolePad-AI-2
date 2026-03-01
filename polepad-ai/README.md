@@ -289,3 +289,13 @@ Full schema at http://localhost:8000/docs
 
 Built with ❤️ for the USC-Dominion Energy infrastructure challenge.  
 Questions? Open an issue or ping the team.
+
+
+## Tests
+
+```bash
+# Requires running Postgres and TEST_DATABASE_URL exported
+export TEST_DATABASE_URL=postgresql+asyncpg://polepad:polepad@localhost:5432/polepad
+cd apps/api
+pytest tests/test_end_to_end.py
+```
