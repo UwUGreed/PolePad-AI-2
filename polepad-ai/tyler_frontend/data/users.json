@@ -1,0 +1,12 @@
+[
+  {
+    "username": "Admin",
+    "password": "Gridstorm",
+    "role": "admin"
+  },
+  {
+    "username": "Wyatt",
+    "password": "Wyatt",
+    "role": "user"
+  }
+]
