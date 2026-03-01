@@ -87,6 +87,7 @@ def _candidate_score(text: str, mean_conf: float) -> float:
 
 
 def run_ocr(binary_img: Image.Image, gray_img: Image.Image) -> tuple[str, float, List[float], List[str]]:
+    """Deterministic multi-pass OCR over binary + grayscale variants."""
     attempts: List[Tuple[str, float, List[float], str]] = []
     for label, img in (("binary", binary_img), ("gray", gray_img)):
         for psm in (7, 8, 6):

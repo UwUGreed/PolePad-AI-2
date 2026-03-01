@@ -87,6 +87,7 @@ services:
     container_name: polepad-api
     ports:
       - "8000:8000"
+    # startup script avoids multiline command merge conflicts
     command: ["/app/scripts/start-api.sh"]
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
@@ -122,6 +123,7 @@ services:
       context: .
       dockerfile: infra/docker/api.Dockerfile
     container_name: polepad-worker
+    # startup script avoids multiline command merge conflicts
     command: ["/app/scripts/start-worker.sh"]
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
@@ -148,6 +150,7 @@ services:
       context: .
       dockerfile: infra/docker/api.Dockerfile
     container_name: polepad-migrate
+    # startup script avoids multiline command merge conflicts
     command: ["/app/scripts/start-migrate.sh"]
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad

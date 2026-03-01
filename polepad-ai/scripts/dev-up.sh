@@ -22,8 +22,10 @@ if command -v podman-compose >/dev/null 2>&1; then
   COMPOSE_CMD=(podman-compose)
 elif command -v docker >/dev/null 2>&1; then
   COMPOSE_CMD=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+  COMPOSE_CMD=(docker-compose)
 else
-  echo "ERROR: Neither podman-compose nor docker compose is installed." >&2
+  echo "ERROR: Neither podman-compose, docker compose, nor docker-compose is installed." >&2
   exit 1
 fi
 
