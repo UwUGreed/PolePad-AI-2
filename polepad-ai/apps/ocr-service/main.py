@@ -23,6 +23,7 @@ log = logging.getLogger("ocr-service")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 MODEL_VERSION = os.getenv("OCR_MODEL_VERSION", "tesseract-tag-v1.2.0")
+MODEL_VERSION = os.getenv("OCR_MODEL_VERSION", "tesseract-tag-v1.1.0")
 UNCERTAINTY_THRESHOLD = float(os.getenv("OCR_UNCERTAINTY_THRESHOLD", "0.75"))
 
 ocr_ok = False
@@ -45,6 +46,7 @@ def normalize_tag(s: str) -> str:
 
 
 def preprocess_tag_image(img: Image.Image) -> tuple[Image.Image, Image.Image, List[str]]:
+def preprocess_tag_image(img: Image.Image) -> tuple[Image.Image, List[str]]:
     steps: List[str] = []
     arr = np.array(img.convert("RGB"))
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
@@ -61,6 +63,13 @@ def preprocess_tag_image(img: Image.Image) -> tuple[Image.Image, Image.Image, Li
 
 def _ocr_with_config(img: Image.Image, psm: int) -> tuple[str, float, List[float]]:
     config = f"--psm {psm} --oem 3 -c tessedit_char_whitelist={WHITELIST}"
+    up = cv2.resize(th, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+    steps.append("upscaled_3x")
+    return Image.fromarray(up), steps
+
+
+def run_ocr(img: Image.Image) -> tuple[str, float, List[float]]:
+    config = "--psm 7 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_/."
     raw = pytesseract.image_to_string(img, config=config).strip()
     data = pytesseract.image_to_data(img, config=config, output_type=pytesseract.Output.DICT)
     confs: List[float] = []
@@ -153,6 +162,8 @@ def extract(req: OCRExtractRequest):
 
     processed_bin, processed_gray, steps = preprocess_tag_image(img)
     raw_text, mean_conf, confs, ocr_steps = run_ocr(processed_bin, processed_gray)
+    processed, steps = preprocess_tag_image(img)
+    raw_text, mean_conf, confs = run_ocr(processed)
     normalized = normalize_tag(raw_text)
 
     chars: List[CharacterConfidence] = []
@@ -173,5 +184,6 @@ def extract(req: OCRExtractRequest):
         uncertain_positions=uncertain_positions,
         mean_confidence=round(mean_conf, 4),
         preprocessing_applied=steps + ocr_steps,
+        preprocessing_applied=steps,
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
