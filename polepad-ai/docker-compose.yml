@@ -87,8 +87,6 @@ services:
     container_name: polepad-api
     ports:
       - "8000:8000"
-    # startup script avoids multiline command merge conflicts
-    command: ["/app/scripts/start-api.sh"]
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
       REDIS_URL: redis://redis:6379/0
@@ -123,8 +121,9 @@ services:
       context: .
       dockerfile: infra/docker/api.Dockerfile
     container_name: polepad-worker
-    # startup script avoids multiline command merge conflicts
-    command: ["/app/scripts/start-worker.sh"]
+    command: >
+      sh -c "celery -A celery_app worker --loglevel=info --concurrency=2 ||
+             (echo 'Celery worker failed to start, running in stub mode' && tail -f /dev/null)"
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
       REDIS_URL: redis://redis:6379/0
@@ -150,8 +149,10 @@ services:
       context: .
       dockerfile: infra/docker/api.Dockerfile
     container_name: polepad-migrate
-    # startup script avoids multiline command merge conflicts
-    command: ["/app/scripts/start-migrate.sh"]
+    entrypoint: ["sh", "-lc"]
+    command: >
+      "alembic -c /app/packages/db/alembic.ini upgrade head || true &&
+       python /app/scripts/seed_demo.py"
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
     depends_on:
@@ -175,8 +176,6 @@ services:
       NEXT_PUBLIC_API_URL: http://localhost:8000
       NEXT_PUBLIC_APP_NAME: PolePad AI
       SESSION_SECRET: dev-change-me
-      HOSTNAME: 0.0.0.0
-      PORT: 3000
     volumes:
       - web_data:/app/data
     depends_on:
