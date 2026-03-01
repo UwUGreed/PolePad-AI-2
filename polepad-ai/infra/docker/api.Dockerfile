@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 # Install Python deps
 COPY apps/api/requirements.txt /tmp/api-requirements.txt
-COPY packages/shared-types/requirements.txt /tmp/shared-requirements.txt
+COPY packages/shared_types/requirements.txt /tmp/shared-requirements.txt
 RUN pip install --no-cache-dir \
     -r /tmp/api-requirements.txt \
     -r /tmp/shared-requirements.txt
