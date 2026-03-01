@@ -1,4 +1,10 @@
 services:
-  api:
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        FRONTEND_DIR: GridstormFrontEnd
     environment:
-      ALLOWED_ORIGINS: "http://localhost:3000"
+      NEXT_PUBLIC_API_URL: "http://localhost:8000"
+      SESSION_SECRET: "dev-change-me"
