@@ -6,7 +6,7 @@ import re
 import time
 import logging
 from io import BytesIO
-from typing import List
+from typing import List, Tuple
 
 import cv2
 import numpy as np
@@ -27,6 +27,8 @@ UNCERTAINTY_THRESHOLD = float(os.getenv("OCR_UNCERTAINTY_THRESHOLD", "0.75"))
 
 ocr_ok = False
 tesseract_version = None
+
+WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_/."
 
 
 class OCRExtractRequest(BaseModel):
