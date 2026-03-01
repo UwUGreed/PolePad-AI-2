@@ -85,13 +85,12 @@ services:
     container_name: polepad-api
     ports:
       - "8000:8000"
-    env_file:
-      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
       REDIS_URL: redis://redis:6379/0
       CV_SERVICE_URL: http://cv-service:8001
       OCR_SERVICE_URL: http://ocr-service:8002
+      ALLOWED_ORIGINS: http://localhost:3000
       IMAGE_STORAGE_BACKEND: local
       LOCAL_IMAGE_DIR: /data/images
     volumes:
@@ -123,8 +122,6 @@ services:
     command: >
       sh -c "celery -A celery_app worker --loglevel=info --concurrency=2 ||
              (echo 'Celery worker failed to start, running in stub mode' && tail -f /dev/null)"
-    env_file:
-      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
       REDIS_URL: redis://redis:6379/0
@@ -154,8 +151,6 @@ services:
     command: >
       "alembic -c /app/packages/db/alembic.ini upgrade head || true &&
        python /app/scripts/seed_demo.py"
-    env_file:
-      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
     depends_on:
@@ -170,12 +165,17 @@ services:
     build:
       context: .
       dockerfile: infra/docker/web.Dockerfile
+      args:
+        FRONTEND_DIR: ${FRONTEND_DIR:-apps/web}
     container_name: polepad-web
     ports:
       - "3000:3000"
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000
       NEXT_PUBLIC_APP_NAME: PolePad AI
+      SESSION_SECRET: dev-change-me
+    volumes:
+      - web_data:/app/data
     depends_on:
       api:
         condition: service_healthy
@@ -183,6 +183,7 @@ services:
 volumes:
   postgres_data:
   image_data:
+  web_data:
 
 networks:
   default:
