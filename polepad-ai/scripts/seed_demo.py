@@ -87,7 +87,7 @@ async def seed():
             user = User(
                 id=DEMO_USER["id"],
                 email=DEMO_USER["email"],
-                hashed_password=pwd_context.hash(DEMO_USER["password"]),
+                hashed_password=pwd_context.hash(DEMO_USER["password"][:72]),
                 display_name=DEMO_USER["display_name"],
                 role=DEMO_USER["role"],
             )

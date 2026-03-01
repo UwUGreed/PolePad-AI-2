@@ -87,6 +87,8 @@ services:
     container_name: polepad-api
     ports:
       - "8000:8000"
+    # startup script avoids multiline command merge conflicts
+    command: ["/app/scripts/start-api.sh"]
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
       REDIS_URL: redis://redis:6379/0
@@ -98,12 +100,9 @@ services:
     volumes:
       - image_data:/data/images
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      ocr-service:
-        condition: service_healthy
+      - postgres
+      - redis
+      - ocr-service
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -121,6 +120,8 @@ services:
       context: .
       dockerfile: infra/docker/api.Dockerfile
     container_name: polepad-worker
+    # startup script avoids multiline command merge conflicts
+    command: ["/app/scripts/start-worker.sh"]
     command: >
       sh -c "celery -A celery_app worker --loglevel=info --concurrency=2 ||
              (echo 'Celery worker failed to start, running in stub mode' && tail -f /dev/null)"
@@ -134,10 +135,8 @@ services:
     volumes:
       - image_data:/data/images
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - postgres
+      - redis
 
   # ─────────────────────────────────────────────
   # Database Setup
@@ -149,6 +148,8 @@ services:
       context: .
       dockerfile: infra/docker/api.Dockerfile
     container_name: polepad-migrate
+    # startup script avoids multiline command merge conflicts
+    command: ["/app/scripts/start-migrate.sh"]
     entrypoint: ["sh", "-lc"]
     command: >
       "alembic -c /app/packages/db/alembic.ini upgrade head || true &&
@@ -156,8 +157,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://polepad:polepad@postgres:5432/polepad
     depends_on:
-      postgres:
-        condition: service_healthy
+      - postgres
     restart: "no"
 
   # ─────────────────────────────────────────────
@@ -176,11 +176,12 @@ services:
       NEXT_PUBLIC_API_URL: http://localhost:8000
       NEXT_PUBLIC_APP_NAME: PolePad AI
       SESSION_SECRET: dev-change-me
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
     volumes:
       - web_data:/app/data
     depends_on:
-      api:
-        condition: service_healthy
+      - api
 
 volumes:
   postgres_data:

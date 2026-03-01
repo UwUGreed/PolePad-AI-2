@@ -13,3 +13,5 @@ boto3==1.34.100
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 h3==3.7.7
+
+bcrypt==3.2.2
