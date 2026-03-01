@@ -2,12 +2,10 @@
 packages/db/models.py
 
 SQLAlchemy async models for PolePad AI.
-All tables are append-only / soft-deleted — no destructive updates.
 """
 
 from __future__ import annotations
 import uuid
-from datetime import datetime
 from sqlalchemy import (
     Column, String, Float, Integer, Boolean, DateTime,
     ForeignKey, JSON, ARRAY, Text, UniqueConstraint, Index
@@ -25,28 +23,40 @@ def new_uuid():
     return str(uuid.uuid4())
 
 
+class County(Base):
+    __tablename__ = "counties"
+
+    id = Column(String(64), primary_key=True)
+    name = Column(String(128), nullable=False)
+    state = Column(String(32), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class Asset(Base):
     __tablename__ = "assets"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=new_uuid)
     normalized_tag = Column(String(64), unique=True, nullable=False, index=True)
     asset_type = Column(String(32), nullable=False, default="unknown")
+    vegetation = Column(Boolean, nullable=True)
+    county_id = Column(String(64), ForeignKey("counties.id"), nullable=True, index=True)
     location_lat = Column(Float, nullable=True)
     location_lon = Column(Float, nullable=True)
     location_h3_index = Column(String(16), nullable=True, index=True)
     status = Column(String(20), nullable=False, default="pending")
     consensus_score = Column(Float, nullable=False, default=0.0)
+    last_inspection_id = Column(UUID(as_uuid=False), ForeignKey("inspections.id"), nullable=True, index=True)
+    last_inspection_date = Column(DateTime(timezone=True), nullable=True)
+    current_flag_id = Column(UUID(as_uuid=False), ForeignKey("flags.id"), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Relationships
-    inspections = relationship("Inspection", back_populates="asset", order_by="Inspection.created_at.desc()")
+    inspections = relationship("Inspection", back_populates="asset", foreign_keys="Inspection.asset_id", order_by="Inspection.created_at.desc()")
     consensus = relationship("ConsensusScore", back_populates="asset", uselist=False)
+    flags = relationship("Flag", back_populates="asset", foreign_keys="Flag.asset_id")
 
-    __table_args__ = (
-        Index("ix_assets_status", "status"),
-    )
+    __table_args__ = (Index("ix_assets_status", "status"),)
 
 
 class Inspection(Base):
@@ -55,27 +65,50 @@ class Inspection(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=new_uuid)
     asset_id = Column(UUID(as_uuid=False), ForeignKey("assets.id"), nullable=True, index=True)
     image_s3_key = Column(String(512), nullable=False)
+    original_filename = Column(String(256), nullable=True)
     image_width = Column(Integer, nullable=True)
     image_height = Column(Integer, nullable=True)
     exif_metadata = Column(JSON, nullable=True)
-    model_version_cv = Column(String(32), nullable=False, default="unknown")
-    model_version_ocr = Column(String(32), nullable=False, default="unknown")
+    model_version_cv = Column(String(64), nullable=False, default="unknown")
+    model_version_ocr = Column(String(64), nullable=False, default="unknown")
     overall_confidence = Column(Float, nullable=False, default=0.0)
-    status = Column(String(20), nullable=False, default="pending")
+    status = Column(String(32), nullable=False, default="pending")
     flags = Column(ARRAY(String), nullable=True, default=[])
     inspector_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
+    inspection_date = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    uploader_user = Column(String(128), nullable=True)
+    county_id = Column(String(64), ForeignKey("counties.id"), nullable=True)
+    vegetation = Column(Boolean, nullable=True)
+    pole_material = Column(String(32), nullable=False, default="unknown")
+    normalized_tag_candidate = Column(String(64), nullable=True, index=True)
     version = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    # Relationships
-    asset = relationship("Asset", back_populates="inspections")
+    asset = relationship("Asset", back_populates="inspections", foreign_keys=[asset_id])
     tags = relationship("ExtractedTag", back_populates="inspection", cascade="all, delete-orphan")
     attributes = relationship("AttributeDetection", back_populates="inspection", cascade="all, delete-orphan")
     validations = relationship("UserValidation", back_populates="inspection")
+    flags_rel = relationship("Flag", back_populates="inspection", foreign_keys="Flag.inspection_id")
 
-    __table_args__ = (
-        Index("ix_inspections_asset_created", "asset_id", "created_at"),
-    )
+    __table_args__ = (Index("ix_inspections_asset_created", "asset_id", "created_at"),)
+
+
+class Flag(Base):
+    __tablename__ = "flags"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=new_uuid)
+    asset_id = Column(UUID(as_uuid=False), ForeignKey("assets.id"), nullable=False, index=True)
+    inspection_id = Column(UUID(as_uuid=False), ForeignKey("inspections.id"), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="open")
+    reason = Column(String(128), nullable=False, default="canonical_mismatch")
+    mismatch_fields = Column(JSON, nullable=False, default=[])
+    resolved_by = Column(String(128), nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    asset = relationship("Asset", back_populates="flags", foreign_keys=[asset_id])
+    inspection = relationship("Inspection", back_populates="flags_rel", foreign_keys=[inspection_id])
 
 
 class ExtractedTag(Base):
@@ -104,7 +137,7 @@ class AttributeDetection(Base):
     confidence = Column(Float, nullable=False)
     bounding_box = Column(JSON, nullable=False)
     is_safety_relevant = Column(Boolean, nullable=False, default=False)
-    sap_work_order_id = Column(String(32), nullable=True)  # Set when SAP WO is created
+    sap_work_order_id = Column(String(32), nullable=True)
 
     inspection = relationship("Inspection", back_populates="attributes")
 
@@ -115,7 +148,7 @@ class UserValidation(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=new_uuid)
     inspection_id = Column(UUID(as_uuid=False), ForeignKey("inspections.id"), nullable=False, index=True)
     user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=False, index=True)
-    action = Column(String(20), nullable=False)  # confirm, dispute, edit
+    action = Column(String(20), nullable=False)
     corrected_tag = Column(String(64), nullable=True)
     corrected_attributes = Column(JSON, nullable=True)
     validation_confidence = Column(Float, nullable=True)
@@ -123,9 +156,7 @@ class UserValidation(Base):
 
     inspection = relationship("Inspection", back_populates="validations")
 
-    __table_args__ = (
-        UniqueConstraint("inspection_id", "user_id", name="uq_validation_per_user"),
-    )
+    __table_args__ = (UniqueConstraint("inspection_id", "user_id", name="uq_validation_per_user"),)
 
 
 class ConsensusScore(Base):
@@ -151,13 +182,12 @@ class User(Base):
     email = Column(String(256), unique=True, nullable=False, index=True)
     hashed_password = Column(String(128), nullable=False)
     display_name = Column(String(64), nullable=True)
-    role = Column(String(20), nullable=False, default="community")  # community, field_inspector, admin
+    role = Column(String(20), nullable=False, default="community")
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class InspectionJob(Base):
-    """Tracks async inference job state"""
     __tablename__ = "inspection_jobs"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=new_uuid)

@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 COPY packages/shared_types/ /app/packages/shared_types/
 
 COPY apps/cv-service/ /app/
+COPY scripts/yolov8n.pt /app/yolov8n.pt
 
 # Model cache dir
 RUN mkdir -p /app/models/demo

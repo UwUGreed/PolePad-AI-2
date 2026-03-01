@@ -1,16 +1,4 @@
 services:
-  web:
-    build:
-      context: .
-      dockerfile: infra/docker/frontend.Dockerfile
-    ports:
-      - "3000:3000"
-    environment:
-      NEXT_PUBLIC_API_URL: "http://localhost:8000"
-      SESSION_SECRET: "dev-change-me"
-    volumes:
-      - ./GridstormFrontEnd/data:/app/data:Z
-
   api:
     environment:
       ALLOWED_ORIGINS: "http://localhost:3000"
