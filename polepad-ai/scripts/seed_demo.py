@@ -10,7 +10,7 @@ import asyncio
 import os
 import sys
 sys.path.insert(0, "/app/packages/db")
-sys.path.insert(0, "/app/packages/shared-types")
+sys.path.insert(0, "/app/packages/shared_types")
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from models import Base, Asset, Inspection, ExtractedTag, AttributeDetection, ConsensusScore, User, InspectionJob
@@ -118,7 +118,7 @@ async def seed():
             inspection = Inspection(
                 id=insp_id,
                 asset_id=asset.id,
-                image_s3_key=f"local:///data/images/demo_{asset.normalized_tag}.jpg",
+                image_s3_key=f"inspections/demo_{asset.normalized_tag}.jpg",
                 status="complete",
                 model_version_cv="yolov8-poles-demo-v1.0.0",
                 model_version_ocr="paddleocr-tag-demo-v1.0.0",
