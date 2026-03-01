@@ -1,20 +1,9 @@
-"""
-packages/shared_types/schemas.py
-
-Single source of truth for all data contracts.
-Used by: api, cv-service, ocr-service, comms package.
-"""
-
 from __future__ import annotations
 from enum import Enum
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from datetime import datetime
 
-
-# ─────────────────────────────────────────────────────────────
-# Enums
-# ─────────────────────────────────────────────────────────────
 
 class AssetStatus(str, Enum):
     PENDING = "pending"
@@ -23,6 +12,7 @@ class AssetStatus(str, Enum):
     DISPUTED = "disputed"
     DECOMMISSIONED = "decommissioned"
 
+
 class InspectionStatus(str, Enum):
     QUEUED = "queued"
     PROCESSING = "processing"
@@ -30,19 +20,16 @@ class InspectionStatus(str, Enum):
     FAILED = "failed"
     NO_TAG_DETECTED = "no_tag_detected"
     LOW_QUALITY = "low_quality"
+    MANUAL_REVIEW = "manual_review"
+    FLAGGED = "flagged"
+    PROCESSED = "processed"
+
 
 class ValidationAction(str, Enum):
     CONFIRM = "confirm"
     DISPUTE = "dispute"
     EDIT = "edit"
 
-class AssetType(str, Enum):
-    POLE_WOOD = "pole_wood"
-    POLE_STEEL = "pole_steel"
-    POLE_CONCRETE = "pole_concrete"
-    CROSSARM = "crossarm"
-    TRANSFORMER = "transformer"
-    UNKNOWN = "unknown"
 
 class AttributeClass(str, Enum):
     VEGETATION_CONTACT = "vegetation_contact"
@@ -54,73 +41,57 @@ class AttributeClass(str, Enum):
     SAFETY_EQUIPMENT_MISSING = "safety_equipment_missing"
 
 
-# ─────────────────────────────────────────────────────────────
-# Geometry
-# ─────────────────────────────────────────────────────────────
-
 class BoundingBox(BaseModel):
-    x1: float = Field(..., description="Left pixel coordinate")
-    y1: float = Field(..., description="Top pixel coordinate")
-    x2: float = Field(..., description="Right pixel coordinate")
-    y2: float = Field(..., description="Bottom pixel coordinate")
-    width: float = Field(default=0)
-    height: float = Field(default=0)
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    width: float = 0
+    height: float = 0
 
     def model_post_init(self, __context):
-        # Use regular assignment — model is not frozen
         self.width = self.x2 - self.x1
         self.height = self.y2 - self.y1
+
 
 class GeoPoint(BaseModel):
     lat: Optional[float] = None
     lon: Optional[float] = None
 
 
-# ─────────────────────────────────────────────────────────────
-# CV Service Contracts
-# ─────────────────────────────────────────────────────────────
-
 class CVDetectRequest(BaseModel):
-    """POST /detect on cv-service"""
-    image_b64: str = Field(..., description="Base64-encoded image bytes")
-    image_id: str = Field(..., description="Job or image UUID for tracing")
+    image_b64: str
+    image_id: str
+
 
 class TagDetection(BaseModel):
-    """A single detected asset tag region"""
     bounding_box: BoundingBox
     detection_confidence: float = Field(..., ge=0.0, le=1.0)
 
+
 class AttributeDetection(BaseModel):
-    """A single infrastructure attribute detection"""
     class_label: AttributeClass
     confidence: float = Field(..., ge=0.0, le=1.0)
     bounding_box: BoundingBox
     is_safety_relevant: bool = False
 
+
 class CVDetectResponse(BaseModel):
-    """Response from cv-service /detect"""
     image_id: str
     model_version: str
     tags: List[TagDetection] = Field(default_factory=list)
     attributes: List[AttributeDetection] = Field(default_factory=list)
+    pole_material: str = "unknown"
+    pole_material_confidence: float = 0.0
     processing_ms: int = 0
     flags: List[str] = Field(default_factory=list)
 
 
-# ─────────────────────────────────────────────────────────────
-# OCR Service Contracts
-# ─────────────────────────────────────────────────────────────
-
 class OCRExtractRequest(BaseModel):
-    """POST /extract on ocr-service"""
-    image_b64: str = Field(..., description="Base64-encoded cropped tag image")
+    image_b64: str
     image_id: str
-    # FIX: Made optional — ocr-service doesn't use it and api reconstructs
-    # responses from DB without the original bbox available
-    original_bounding_box: Optional[BoundingBox] = Field(
-        default=None,
-        description="Position in original image for reference (optional)"
-    )
+    original_bounding_box: Optional[BoundingBox] = None
+
 
 class CharacterConfidence(BaseModel):
     char: str
@@ -128,8 +99,8 @@ class CharacterConfidence(BaseModel):
     uncertain: bool = False
     position: int
 
+
 class OCRExtractResponse(BaseModel):
-    """Response from ocr-service /extract"""
     image_id: str
     model_version: str
     raw_string: str
@@ -139,96 +110,84 @@ class OCRExtractResponse(BaseModel):
     mean_confidence: float
     preprocessing_applied: List[str] = Field(default_factory=list)
     processing_ms: int = 0
-    # FIX: Not included in DB storage or api reconstruction — must be optional
     original_bounding_box: Optional[BoundingBox] = None
 
 
-# ─────────────────────────────────────────────────────────────
-# API ↔ Frontend Contracts
-# ─────────────────────────────────────────────────────────────
-
 class UploadResponse(BaseModel):
-    """Returned immediately after image upload"""
     job_id: str
-    status: InspectionStatus
+    status: str
     poll_url: str
 
+
 class InferenceResult(BaseModel):
-    """Full inference result — returned when job is complete"""
     job_id: str
-    status: InspectionStatus
+    status: str
     inspection_id: Optional[str] = None
     asset_id: Optional[str] = None
-    model_versions: dict = Field(default_factory=dict)
+    model_versions: dict
     tags: List[OCRExtractResponse] = Field(default_factory=list)
     attributes: List[AttributeDetection] = Field(default_factory=list)
+    pole_material: str = "unknown"
     overall_confidence: float = 0.0
     flags: List[str] = Field(default_factory=list)
-    error: Optional[str] = None
-    created_at: Optional[datetime] = None
+
 
 class ValidationRequest(BaseModel):
-    """POST /inspections/{id}/validate"""
     action: ValidationAction
-    corrected_tag: Optional[str] = Field(None, max_length=64)
-    corrected_attributes: Optional[List[dict]] = None
-    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    corrected_tag: Optional[str] = None
+    corrected_attributes: Optional[dict] = None
+    confidence: Optional[float] = None
+
 
 class ValidationResponse(BaseModel):
     validation_id: str
     inspection_id: str
     new_consensus_score: float
-    asset_status: AssetStatus
+    asset_status: str
+
 
 class AssetSummary(BaseModel):
-    """Lightweight asset for list views"""
     id: str
     normalized_tag: str
-    asset_type: AssetType
-    status: AssetStatus
+    asset_type: str
+    vegetation: Optional[bool] = None
+    county_id: Optional[str] = None
+    status: str
     consensus_score: float
     location: Optional[GeoPoint] = None
-    last_inspection_at: Optional[datetime] = None
-    inspection_count: int = 0
-
-class AssetDetail(AssetSummary):
-    """Full asset with inspection history"""
-    inspections: List[InferenceResult] = Field(default_factory=list)
 
 
-# ─────────────────────────────────────────────────────────────
-# Integration Contracts (Dominion Stack)
-# ─────────────────────────────────────────────────────────────
-
-class ArcGISFeature(BaseModel):
-    geometry: dict
-    attributes: dict
-
-class PIEventData(BaseModel):
-    element_path: str
-    event_name: str
-    start_time: datetime
-    attributes: dict
-
-class SAPWorkOrderRequest(BaseModel):
-    plant: str
-    order_type: str
-    short_description: str
-    equipment_id: str
-    priority: str = "3"
-    long_text: str = ""
+class InspectionSummary(BaseModel):
+    id: str
+    asset_id: Optional[str] = None
+    normalized_tag_candidate: Optional[str] = None
+    status: str
+    pole_material: str
+    vegetation: Optional[bool] = None
+    county_id: Optional[str] = None
+    created_at: datetime
 
 
-# ─────────────────────────────────────────────────────────────
-# Standard Error Envelope
-# ─────────────────────────────────────────────────────────────
+class FlagSummary(BaseModel):
+    id: str
+    asset_id: str
+    inspection_id: str
+    status: str
+    reason: str
+    mismatch_fields: List[str] = Field(default_factory=list)
+    created_at: datetime
 
-class APIError(BaseModel):
-    code: str
-    message: str
-    request_id: Optional[str] = None
-    retryable: bool = False
-    details: dict = Field(default_factory=dict)
 
-class ErrorResponse(BaseModel):
-    error: APIError
+class InspectionEditRequest(BaseModel):
+    normalized_tag: Optional[str] = None
+    pole_material: Optional[str] = None
+    vegetation: Optional[bool] = None
+    county_id: Optional[str] = None
+
+
+class ReviewerActionResponse(BaseModel):
+    inspection_id: str
+    status: str
+    asset_id: Optional[str] = None
+    flag_id: Optional[str] = None
+
