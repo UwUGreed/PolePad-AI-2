@@ -81,6 +81,12 @@ class Inspection(Base):
     vegetation = Column(Boolean, nullable=True)
     pole_material = Column(String(32), nullable=False, default="unknown")
     normalized_tag_candidate = Column(String(64), nullable=True, index=True)
+    model_prediction_label = Column(String(128), nullable=True)
+    model_prediction_confidence = Column(Float, nullable=False, default=0.0)
+    model_prediction_source = Column(String(32), nullable=True)
+    ocr_raw_text = Column(String(256), nullable=True)
+    ocr_normalized_text = Column(String(128), nullable=True)
+    ocr_confidence = Column(Float, nullable=False, default=0.0)
     version = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

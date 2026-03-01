@@ -137,13 +137,15 @@ class OCRServiceClient(ServiceClient):
         self,
         cropped_image_bytes: bytes,
         image_id: str,
-        original_bbox: Optional[BoundingBox] = None
+        original_bbox: Optional[BoundingBox] = None,
+        fallback_image_bytes: Optional[bytes] = None
     ) -> OCRExtractResponse:
         image_b64 = base64.b64encode(cropped_image_bytes).decode("utf-8")
         request = OCRExtractRequest(
             image_b64=image_b64,
             image_id=image_id,
-            original_bounding_box=original_bbox
+            original_bounding_box=original_bbox,
+            fallback_image_b64=base64.b64encode(fallback_image_bytes).decode("utf-8") if fallback_image_bytes else None,
         )
         raw = await self.post("/extract", request.model_dump())
         return OCRExtractResponse(**raw)
