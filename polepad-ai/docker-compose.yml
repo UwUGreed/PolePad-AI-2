@@ -49,8 +49,10 @@ services:
     volumes:
       - ./ml/models:/app/models:ro
     environment:
-      MODEL_PATH: /app/models/demo/best.pt
+      MODEL_PATH: /app/yolov8n.pt
       MODEL_VERSION: demo-v1.0.0
+      POLE_MATERIAL_MODEL_PATH: /app/yolov8n.pt
+      POLE_MATERIAL_MODEL_VERSION: demo-pole-material-v1
       DETECTION_CONFIDENCE_THRESHOLD: 0.45
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]

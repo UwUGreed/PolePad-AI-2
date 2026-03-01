@@ -137,7 +137,7 @@ class OCRServiceClient(ServiceClient):
         self,
         cropped_image_bytes: bytes,
         image_id: str,
-        original_bbox: BoundingBox
+        original_bbox: Optional[BoundingBox] = None
     ) -> OCRExtractResponse:
         image_b64 = base64.b64encode(cropped_image_bytes).decode("utf-8")
         request = OCRExtractRequest(
