@@ -18,17 +18,27 @@ Built to feed directly into **Dominion Energy's existing stack**: Esri ArcGIS En
 
 ---
 
-## 🚀 Run It In 3 Commands (Demo / Judge Mode)
+## 🚀 Quick Start (Fedora Podman + Docker)
 
-**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+From a fresh clone, run from `polepad-ai/`:
 
 ```bash
-git clone https://github.com/your-org/polepad-ai.git
-cd polepad-ai
-docker compose up --build
+./scripts/dev-up.sh
 ```
 
+The script auto-detects the frontend folder, uses `podman-compose` when available (or `docker compose` as fallback), starts the full stack, and prints health checks.
+
 Then open **http://localhost:3000** in your browser.
+
+### Manual commands
+
+```bash
+# Fedora / rootless Podman
+podman-compose up -d --build
+
+# Docker Compose
+docker compose up -d --build
+```
 
 That's it. Everything runs locally — no cloud account, no API keys required.
 
@@ -114,7 +124,9 @@ polepad-ai/
 
 ## Configuration
 
-Copy `.env.example` to `.env` (already done for local demo mode):
+`.env` is optional for local compose startup; the default stack works out-of-the-box without creating it.
+
+If you want to override defaults, copy `.env.example` to `.env`:
 
 ```bash
 cp .env.example .env
@@ -133,6 +145,8 @@ Key variables:
 | `PI_SYSTEM_ENABLED` | `false` | Set `true` + add PI System URL |
 | `SAP_ENABLED` | `false` | Set `true` + add SAP endpoint |
 | `MODEL_PATH` | `ml/models/demo/best.pt` | Path to YOLO weights |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Frontend API base URL |
+| `ALLOWED_ORIGINS` | `http://localhost:3000` | API CORS allow-list |
 
 ---
 
