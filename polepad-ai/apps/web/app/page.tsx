@@ -20,6 +20,11 @@ interface AttrResult {
   confidence: number;
   is_safety_relevant: boolean;
 }
+interface ModelDecision {
+  label: string;
+  confidence: number;
+  source: string;
+}
 interface InferenceResult {
   job_id: string;
   status: string;
@@ -29,6 +34,13 @@ interface InferenceResult {
   attributes: AttrResult[];
   overall_confidence: number;
   flags: string[];
+  model_prediction_label?: string;
+  model_prediction_confidence: number;
+  model_prediction_source?: string;
+  ocr_raw_text?: string;
+  ocr_normalized_text?: string;
+  ocr_confidence: number;
+  primary_decision?: ModelDecision;
 }
 interface Asset {
   id: string;
@@ -328,6 +340,32 @@ export default function Home() {
                       </span>
                     </div>
                     <ConfidenceMeter score={result.overall_confidence} />
+                  </div>
+
+                  <div className="bg-white border border-gray-200 rounded-lg p-4">
+                    <h4 className="font-semibold text-gray-700 mb-2">Model Decision</h4>
+                    {result.primary_decision ? (
+                      <>
+                        <p className="text-sm text-gray-600 mb-1">
+                          Predicted Class: <span className="font-semibold text-gray-900">{result.primary_decision.label}</span>
+                        </p>
+                        <p className="text-xs text-gray-500 mb-2">Source: {result.primary_decision.source}</p>
+                        <ConfidenceMeter score={result.primary_decision.confidence} />
+                      </>
+                    ) : (
+                      <p className="text-sm text-gray-500">No model decision available.</p>
+                    )}
+                  </div>
+
+                  <div className="bg-white border border-gray-200 rounded-lg p-4">
+                    <h4 className="font-semibold text-gray-700 mb-2">OCR Result</h4>
+                    <p className="text-sm text-gray-600">
+                      Extracted ID: <span className="font-mono text-gray-900">{result.ocr_normalized_text || 'N/A'}</span>
+                    </p>
+                    {result.ocr_raw_text && (
+                      <p className="text-xs text-gray-500 mb-2">Raw OCR: {result.ocr_raw_text}</p>
+                    )}
+                    <ConfidenceMeter score={result.ocr_confidence ?? 0} />
                   </div>
 
                   {/* Tags */}

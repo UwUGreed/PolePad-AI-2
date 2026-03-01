@@ -37,7 +37,7 @@ class _FakeCV:
 
 
 class _FakeOCR:
-    async def extract(self, cropped_image_bytes: bytes, image_id: str, original_bbox=None):
+    async def extract(self, cropped_image_bytes: bytes, image_id: str, original_bbox=None, fallback_image_bytes=None):
         from schemas import OCRExtractResponse, CharacterConfidence
         return OCRExtractResponse(
             image_id=image_id,

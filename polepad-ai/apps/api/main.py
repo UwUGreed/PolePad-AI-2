@@ -13,7 +13,7 @@ from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Backgroun
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy import select, update
+from sqlalchemy import select, update, text
 
 import sys
 sys.path.insert(0, "/app/packages/shared_types")
@@ -25,7 +25,7 @@ from schemas import (
     AssetSummary, InspectionStatus, ValidationAction,
     OCRExtractResponse, CharacterConfidence,
     AttributeDetection as SchemaAttributeDetection,
-    BoundingBox, AttributeClass,
+    BoundingBox, AttributeClass, ModelDecision,
     InspectionSummary, InspectionEditRequest, ReviewerActionResponse, FlagSummary,
 )
 from client import ServiceBus, calculate_consensus_score
@@ -89,6 +89,20 @@ async def get_db():
 
 bus: Optional[ServiceBus] = None
 
+
+async def ensure_schema_updates() -> None:
+    async with engine.begin() as conn:
+        for stmt in (
+            "ALTER TABLE inspections ADD COLUMN IF NOT EXISTS model_prediction_label VARCHAR(128)",
+            "ALTER TABLE inspections ADD COLUMN IF NOT EXISTS model_prediction_confidence DOUBLE PRECISION DEFAULT 0.0 NOT NULL",
+            "ALTER TABLE inspections ADD COLUMN IF NOT EXISTS model_prediction_source VARCHAR(32)",
+            "ALTER TABLE inspections ADD COLUMN IF NOT EXISTS ocr_raw_text VARCHAR(256)",
+            "ALTER TABLE inspections ADD COLUMN IF NOT EXISTS ocr_normalized_text VARCHAR(128)",
+            "ALTER TABLE inspections ADD COLUMN IF NOT EXISTS ocr_confidence DOUBLE PRECISION DEFAULT 0.0 NOT NULL",
+        ):
+            await conn.execute(text(stmt))
+
+
 def get_bus() -> ServiceBus:
     return bus
 
@@ -98,6 +112,7 @@ async def lifespan(app: FastAPI):
     global bus
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ensure_schema_updates()
     bus = ServiceBus.from_env()
     yield
     await bus.close()
@@ -206,12 +221,13 @@ async def run_inference_pipeline(job_id: str, image_bytes: bytes, lat: Optional[
             tag_det = cv_result.tags[0] if cv_result.tags else None
             if tag_det:
                 crop = crop_image(image_bytes, tag_det.bounding_box.model_dump())
-                ocr_result = await bus.ocr.extract(crop, job_id, tag_det.bounding_box)
+                ocr_result = await bus.ocr.extract(crop, job_id, tag_det.bounding_box, fallback_image_bytes=image_bytes)
             else:
                 ocr_result = await bus.ocr.extract(image_bytes, job_id, None)
 
             vegetation = any(a.class_label == AttributeClass.VEGETATION_CONTACT for a in cv_result.attributes)
-            overall_conf = ocr_result.mean_confidence if ocr_result.normalized_string else 0.0
+            model_decision = cv_result.primary_decision
+            overall_conf = max(ocr_result.mean_confidence, (model_decision.confidence if model_decision else 0.0))
 
             insp.pole_material = cv_result.pole_material or "unknown"
             insp.vegetation = vegetation
@@ -219,6 +235,12 @@ async def run_inference_pipeline(job_id: str, image_bytes: bytes, lat: Optional[
             insp.model_version_ocr = ocr_result.model_version
             insp.overall_confidence = overall_conf
             insp.normalized_tag_candidate = ocr_result.normalized_string or None
+            insp.model_prediction_label = model_decision.label if model_decision else None
+            insp.model_prediction_confidence = model_decision.confidence if model_decision else 0.0
+            insp.model_prediction_source = model_decision.source if model_decision else None
+            insp.ocr_raw_text = ocr_result.raw_string or None
+            insp.ocr_normalized_text = ocr_result.normalized_string or None
+            insp.ocr_confidence = ocr_result.mean_confidence
 
             bbox_payload = tag_det.bounding_box.model_dump() if tag_det else BoundingBox(x1=0, y1=0, x2=0, y2=0).model_dump()
             db.add(ExtractedTag(
@@ -302,6 +324,7 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
             uncertain_positions=t.uncertain_positions or [],
             mean_confidence=t.ocr_confidence,
             preprocessing_applied=t.preprocessing_flags or [],
+            original_bounding_box=BoundingBox(**t.bounding_box) if t.bounding_box else None,
         ))
 
     attrs_out = []
@@ -312,6 +335,14 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
             bounding_box=BoundingBox(**a.bounding_box),
             is_safety_relevant=a.is_safety_relevant,
         ))
+
+    primary_decision = None
+    if inspection.model_prediction_label:
+        primary_decision = ModelDecision(
+            label=inspection.model_prediction_label,
+            confidence=inspection.model_prediction_confidence or 0.0,
+            source=inspection.model_prediction_source or "detection",
+        )
 
     return InferenceResult(
         job_id=job_id,
@@ -324,6 +355,13 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
         pole_material=inspection.pole_material,
         overall_confidence=inspection.overall_confidence,
         flags=inspection.flags or [],
+        model_prediction_label=inspection.model_prediction_label,
+        model_prediction_confidence=inspection.model_prediction_confidence or 0.0,
+        model_prediction_source=inspection.model_prediction_source,
+        ocr_raw_text=inspection.ocr_raw_text,
+        ocr_normalized_text=inspection.ocr_normalized_text,
+        ocr_confidence=inspection.ocr_confidence or 0.0,
+        primary_decision=primary_decision,
     )
 
 
