@@ -48,8 +48,9 @@ services:
       - "8001:8001"
     volumes:
       - ./ml/models:/app/models:ro
+      - ${MODEL_WEIGHTS_HOST_DIR:-/home/anon/Desktop/polepad/polepad-ai/ml/models}:/external-models:ro
     environment:
-      MODEL_PATH: /app/yolov8n.pt
+      MODEL_PATH: ${MODEL_PATH:-/external-models/demo/best.pt}
       MODEL_VERSION: demo-v1.0.0
       POLE_MATERIAL_MODEL_PATH: /app/yolov8n.pt
       POLE_MATERIAL_MODEL_VERSION: demo-pole-material-v1

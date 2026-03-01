@@ -1,6 +1,6 @@
 from __future__ import annotations
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
 
@@ -76,6 +76,16 @@ class AttributeDetection(BaseModel):
     is_safety_relevant: bool = False
 
 
+
+
+class ModelDecision(BaseModel):
+    label: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    source: str = "detection"
+    class_index: Optional[int] = None
+    bounding_box: Optional[BoundingBox] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
 class CVDetectResponse(BaseModel):
     image_id: str
     model_version: str
@@ -85,12 +95,14 @@ class CVDetectResponse(BaseModel):
     pole_material_confidence: float = 0.0
     processing_ms: int = 0
     flags: List[str] = Field(default_factory=list)
+    primary_decision: Optional[ModelDecision] = None
 
 
 class OCRExtractRequest(BaseModel):
     image_b64: str
     image_id: str
     original_bounding_box: Optional[BoundingBox] = None
+    fallback_image_b64: Optional[str] = None
 
 
 class CharacterConfidence(BaseModel):
@@ -130,6 +142,13 @@ class InferenceResult(BaseModel):
     pole_material: str = "unknown"
     overall_confidence: float = 0.0
     flags: List[str] = Field(default_factory=list)
+    model_prediction_label: Optional[str] = None
+    model_prediction_confidence: float = 0.0
+    model_prediction_source: Optional[str] = None
+    ocr_raw_text: Optional[str] = None
+    ocr_normalized_text: Optional[str] = None
+    ocr_confidence: float = 0.0
+    primary_decision: Optional[ModelDecision] = None
 
 
 class ValidationRequest(BaseModel):
